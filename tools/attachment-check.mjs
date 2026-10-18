@@ -48,7 +48,10 @@ import {
   startServer,
 } from './lib/cdp.mjs';
 
-const SOURCE_VAULT = '/Users/kywk/kywk/obsidian';
+// See the LIVE_VAULT comment in the other harnesses: never point this at the
+// operator's real vault. MYOBS_LIVE_VAULT overrides it.
+const SOURCE_VAULT =
+  process.env.MYOBS_LIVE_VAULT ?? path.join(process.env.HOME ?? '', 'kywk', 'obsidian');
 const FIXTURE_DIR = path.join(REPO_ROOT, 'tools/fixtures/attachments');
 
 /** Vault subdirectories that receive the fixtures. */

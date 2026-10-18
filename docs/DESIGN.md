@@ -78,7 +78,7 @@ my-obsidian/
 | 6 | Plugin 支援深度 | **L2**：瀏覽器端 Node polyfill + `fs`→RPC。L3（server 端執行）僅保留架構空間，不實作 |
 | 7 | 部署與存取控制 | 預設 bind `127.0.0.1`；`--host 0.0.0.0 --auth-token` 才對外；TLS 交給 reverse proxy。單一 vault，路由 `/v/<vaultId>/` 預留多 vault |
 | 8 | 資料一致性 | **server 為單一寫入者**為原則；外部寫入者存在時採條件寫入 + conflict copy（見 §6） |
-| 9 | 專案落點 | `~/kywk/project/obsidian/my-obsidian`，獨立 git repo |
+| 9 | 專案落點 | 本 repo，獨立 git repo |
 | 10 | 與 Markport 的關係 | **不 fork、不引入程式碼**（GPL-3.0 會綁住產品方向）。僅閱讀其 `archive/desktop-runtime` tag 作為參考，結論寫進本文件並標註出處 |
 | 11 | Plugin 安裝流程 | **已實作**：`GET /api/proxy`（server 端 allowlist + SSRF 防護）、`POST /api/plugins/install`（temp+rename 原子替換、驗 digest、保留 `data.json`）、`POST /api/plugins/uninstall`（移到 `.trash`，不覆蓋）。詳見 §11.12 |
 | 12 | 同步拓撲 | MVP 預設與 vault 同機（Maestral 已在跑）；server 不主動執行任何 git 指令 |
@@ -214,7 +214,7 @@ server config，再由此注入（契約欄位為 `termsText`，見 `CONTRACTS.m
 | 10 | `node tools/resilience-check.mjs` | 8 | 後端重啟：離線偵測（<5s）、寫入明確失敗、離線期間新增檔案、重連（<15s）、reconcile、恢復儲存 |
 | 11 | `node tools/parity-check.mjs` | 8 | popout realm 的 runtime 腳本、避開雙實例、popout 匯出印自己的筆記、host 不受影響、popout 右鍵選單 |
 
-**全部只對 `~/kywk/obsidian` 的複本執行**，真實 vault 從未被寫入。
+**全部只對 實測 vault 的複本執行**，真實 vault 從未被寫入。
 
 效能門檻（實測）：10,150 檔 / 341 MB，冷啟 **≈ 510 ms**；全 vault 掃描 + metadata cache ≈ 1 秒。
 
@@ -241,7 +241,7 @@ server config，再由此注入（契約欄位為 `termsText`，見 `CONTRACTS.m
 | `workspace.json` 未被寫入、`workspace-server.json` 已建立 | ✅ mtime 不變 |
 | console 無未處理例外 | ✅ 0 exception / 0 error（19,280 個 fs 請求、0 失敗） |
 
-驗收對象是 `~/kywk/obsidian` 的複本（10,150 檔、341 MB），**不是真實 vault**。
+驗收對象是 實測 vault 的複本（10,150 檔、341 MB），**不是真實 vault**。
 執行方式：`node tools/spike-check.mjs --vault <複本路徑>`（零依賴，用 Node 內建 WebSocket 驅動本機 Chrome 的 CDP）。
 
 ---
@@ -326,7 +326,7 @@ binaryRoundTrip: false   →   加入 node-globals-shim.js 後   →   binaryRou
 
 ### 11.6 L2 覆蓋率（實測基準）
 
-對 `~/kywk/obsidian` 的 16 個已啟用 plugin：**載入 14 個**。
+對實測 vault 的 16 個已啟用 plugin：**載入 14 個**。
 唯二未載入的是 `vault-feed-reader` 與 `geo-story-map`，兩者都 `require("node:child_process")` ——
 這是 `DESIGN.md` §7 明定的 L2 邊界，不是缺陷。
 

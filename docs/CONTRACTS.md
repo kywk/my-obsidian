@@ -10,9 +10,9 @@ Server 在 HTML 中注入一段同步可用的 JSON，**必須早於任何 shim 
 
 ```html
 <script>window.__MYOBS = {
-  vaultId: "kywk",
-  vaultName: "kywk",
-  vaultPath: "/Users/kywk/kywk/obsidian",   // 絕對路徑，結尾不加斜線
+  vaultId: "myvault",
+  vaultName: "MyVault",
+  vaultPath: "/Users/you/Notes/MyVault",   // 絕對路徑，結尾不加斜線
   resourcesPath: "/obsidian",               // app 資源的 URL 前綴（對應 Electron resourcesPath）
   resourcePrefix: "/v/",                    // 供 adapter.getResourcePath 使用
                                             // ＝ ipcRenderer.sendSync("file-url") 必須回這個值
@@ -22,8 +22,8 @@ Server 在 HTML 中注入一段同步可用的 JSON，**必須早於任何 shim 
   build: "1.14.4",
   platform: "darwin",
   arch: "arm64",
-  documentsDir: "/Users/kywk/Documents",
-  desktopDir: "/Users/kywk/Desktop",
+  documentsDir: "/Users/you/Documents",
+  desktopDir: "/Users/you/Desktop",
   policy: {
     plugins: true, themes: true, snippets: true, sync: true,
     publish: true, webViewer: true, devTools: true, insider: true
@@ -103,7 +103,7 @@ Server 在 HTML 中注入一段同步可用的 JSON，**必須早於任何 shim 
 - `PUT` 可選帶 `X-Write-Token` 標頭，帶了就登記到與 `/api/fs`
   相同的 origin token 表，讓上傳者略過自己的回音事件。`GET`/`HEAD` 不登記（下載不是變更）。
 - URL 形式為 `/v/` + 絕對路徑去掉開頭 `/`，例如
-  `/v/Users/kywk/kywk/obsidian/assets/a.png?1730000000000`。
+  `/v/Users/you/Notes/MyVault/assets/a.png?1730000000000`。
 - 路徑由 `pathToFileURL` **逐段 percent-encode**；Fastify 的 wildcard 參數**已經解碼過一次**，
   伺服器端**不得再 `decodeURIComponent`**：多解一次會把 `a%20b.png` 當成 `a b.png`，
   在檔名含 `%XX` 時**靜默回傳錯誤檔案的位元組**（HTTP 200，內容是別人的）。

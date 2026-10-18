@@ -46,7 +46,11 @@ import {
   waitForPage,
 } from './lib/cdp.mjs';
 
-const LIVE_VAULT = '/Users/kywk/kywk/obsidian';
+// Harnesses write into whichever vault they are pointed at, so they refuse the
+// operator's real vault and demand a copy. Point MYOBS_LIVE_VAULT at your own
+// vault to keep the guard; forks should set it instead of editing this line.
+const LIVE_VAULT =
+  process.env.MYOBS_LIVE_VAULT ?? path.join(process.env.HOME ?? '', 'kywk', 'obsidian');
 const PROBE_ID = 'myobs-notices-broken';
 const CONFLICT_NAME = 'notices-conflict-probe.md';
 

@@ -16,11 +16,11 @@
 3. **`terms` 字串不得出現在本 repo 的任何檔案中**（含測試 fixture、註解、commit message）。
    它由操作者在同意畫面輸入後存進 server config。詳見 `docs/DESIGN.md` §8。
 
-4. **絕對不對 `~/kywk/obsidian` 做寫入。** 那是真實 vault（5,124 篇筆記、1.6 GB、同時是
-   `kywk.github.io` 的 working tree）。測試與回歸一律用複本或暫存目錄。
+4. **不對操作者的真實 vault 做寫入。** 測試與回歸一律用複本或暫存目錄。
+   harness 有 `MYOBS_LIVE_VAULT` 守門（見 `tools/`），但那是輔助，不是保證。
 
-5. **不在 server 執行任何 git 指令。** 該 vault 同時被 Maestral（Dropbox，sync root `/Users/kywk/kywk`）
-   與 git 同步；服務不得成為第三個競爭者。
+5. **不在 server 執行任何 git 指令。** vault 可能同時被 Dropbox／Maestral 之類的同步工具
+   與 git 管理；服務不得成為第三個競爭者。
 
 6. **不上前端 bundler。** shim 必須在 Obsidian 的 `app.js` 之前以 classic script 生效。
    引入 bundler 會製造載入順序問題。
@@ -34,7 +34,6 @@
 
 - Node 22；server 與 shim 都是 **plain JavaScript，無 build step**
 - `vendor/` 由 `node scripts/fetch-obsidian.mjs` 產生（讀 `/Applications/Obsidian.app`）
-- 本機位置：`/Users/kywk/kywk/project/obsidian/my-obsidian`
 
 ## 常用指令
 
