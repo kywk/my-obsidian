@@ -21,8 +21,11 @@
  * mutation.
  */
 
+import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
+import { finished } from 'node:stream/promises';
 
 import { resolveVaultAbsolute } from './paths.js';
 import { contentTypeFor } from './static.js';
@@ -166,14 +169,54 @@ function sendJsonError(request, reply, status, code, message) {
  * @param {unknown} err
  * @returns {import('fastify').FastifyReply}
  */
+function statusForFileError(code) {
+  if (code === 'EPERM' || code === 'EACCES') return 403;
+  if (code === 'ENOENT' || code === 'ENOTDIR') return 404;
+  if (code === 'EISDIR') return 400;
+  if (code === 'ETOOBIG' || code === 'E2BIG') return 413;
+  if (code === 'ENOSPC') return 507;
+  return 500;
+}
+
 function sendFileError(request, reply, err) {
   const code = /** @type {NodeJS.ErrnoException} */ (err)?.code ?? 'EUNKNOWN';
   const message = /** @type {Error} */ (err)?.message ?? String(err);
-  let status = 500;
-  if (code === 'EPERM' || code === 'EACCES') status = 403;
-  else if (code === 'ENOENT' || code === 'ENOTDIR') status = 404;
-  else if (code === 'EISDIR') status = 400;
-  return sendJsonError(request, reply, status, code, message);
+  return sendJsonError(request, reply, statusForFileError(code), code, message);
+}
+
+/**
+ * Error response after reply.hijack(): Fastify no longer owns the socket, so
+ * the body and headers are written directly.
+ *
+ * @param {import('fastify').FastifyReply} reply
+ * @param {number} status
+ * @param {string} code
+ * @param {string} message
+ * @returns {void}
+ */
+function sendRawJsonError(reply, status, code, message) {
+  const raw = reply.raw;
+  if (raw.writableEnded || raw.destroyed || raw.writable === false) return;
+  const body = JSON.stringify({ ok: false, error: { code, message } });
+  raw.statusCode = status;
+  raw.setHeader('content-type', 'application/json; charset=utf-8');
+  raw.setHeader('content-length', String(Buffer.byteLength(body)));
+  // A disconnect can destroy the socket between the check above and end(); a
+  // hijacked reply has no other owner to swallow that error, and an unhandled
+  // 'error' event would take the whole process down.
+  raw.once('error', () => {});
+  raw.end(body);
+}
+
+/**
+ * @param {import('fastify').FastifyReply} reply
+ * @param {unknown} err
+ * @returns {void}
+ */
+function sendRawFileError(reply, err) {
+  const code = /** @type {NodeJS.ErrnoException} */ (err)?.code ?? 'EUNKNOWN';
+  const message = /** @type {Error} */ (err)?.message ?? String(err);
+  sendRawJsonError(reply, statusForFileError(code), code, message);
 }
 
 /**
@@ -206,6 +249,193 @@ function vaultPathFromParams(request) {
  */
 function toAbsoluteInput(decoded) {
   return decoded.startsWith('/') ? decoded : `/${decoded}`;
+}
+
+/**
+ * Stream the request body into `tempPath` without buffering it.
+ *
+ * The route takes over the reply before Fastify's content-type parser runs
+ * (see handleStreamingPut), so this reads `request.raw` directly. A destination
+ * error must leave the client able to receive an error response, which is why
+ * this does not use stream.pipeline(): pipeline destroys the request stream on
+ * any error, and destroying an IncomingMessage destroys its socket before the
+ * 4xx/5xx can be written.
+ *
+ * @param {import('fastify').FastifyRequest} request
+ * @param {string} tempPath
+ * @param {number} limit
+ * @returns {Promise<number>} bytes written
+ * @throws {NodeJS.ErrnoException}
+ */
+async function streamRequestBodyToFile(request, tempPath, limit) {
+  // `wx` never truncates an existing file; the name carries a random UUID, so a
+  // collision is a bug rather than a retry case.
+  const out = fs.createWriteStream(tempPath, { flags: 'wx', mode: 0o600 });
+  try {
+    await once(out, 'open');
+  } catch (err) {
+    out.destroy();
+    throw err;
+  }
+
+  let written = 0;
+  try {
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const settle = (err) => {
+        if (settled) return;
+        settled = true;
+        request.raw.off('data', onData);
+        request.raw.off('end', onEnd);
+        request.raw.off('error', onError);
+        request.raw.off('close', onClose);
+        out.off('drain', onDrain);
+        out.off('error', onError);
+        if (err) reject(err);
+        else resolve();
+      };
+      const onData = (chunk) => {
+        written += chunk.length;
+        if (written > limit) {
+          const error = new Error(`request body exceeds ${limit} bytes`);
+          // @ts-expect-error errno-style code for statusForFileError()
+          error.code = 'ETOOBIG';
+          // Pause rather than destroy: the socket has to stay alive long
+          // enough to deliver the 413.
+          request.raw.pause();
+          settle(error);
+          return;
+        }
+        if (!out.write(chunk)) request.raw.pause();
+      };
+      const onDrain = () => request.raw.resume();
+      const onEnd = () => settle();
+      const onError = (err) => settle(err);
+      const onClose = () => {
+        // 'close' also follows a normal 'end'; `complete` distinguishes them.
+        if (request.raw.complete) return;
+        const error = new Error('client aborted the upload');
+        // @ts-expect-error errno-style code for statusForFileError()
+        error.code = 'ECONNRESET';
+        settle(error);
+      };
+
+      request.raw.on('data', onData);
+      request.raw.on('end', onEnd);
+      request.raw.on('error', onError);
+      request.raw.on('close', onClose);
+      out.on('drain', onDrain);
+      out.on('error', onError);
+    });
+
+    const flushed = finished(out);
+    out.end();
+    await flushed;
+    return written;
+  } catch (err) {
+    /*
+     * Finish the file instead of destroying it: fs.WriteStream.destroy()
+     * while an fs.write is in flight leaves the completion callback writing
+     * into a destroyed stream, which surfaces as an uncaughtException from
+     * node:internal/fs/streams (Node does not turn it into an 'error' event).
+     * At most one highWaterMark of data is still queued here and the temp file
+     * is discarded either way, so flushing it is bounded work.
+     */
+    try {
+      out.end();
+    } catch {
+      /* already finished or errored */
+    }
+    await finished(out).catch(() => {});
+    if (!out.closed) await once(out, 'close').catch(() => {});
+    throw err;
+  }
+}
+
+/**
+ * PUT /v/* handler.
+ *
+ * Why route-level hijack instead of Fastify's body parser: index.js installs a
+ * catch-all `parseAs: "buffer"` parser, so the handler receives the whole body
+ * as one Buffer (bodyLimit is 2 GiB). A custom content-type parser would be
+ * app-wide and would change /api/consent's non-JSON body shape; preParsing
+ * could stream the body but the parser would still run on the (empty) stream
+ * and reject application/json. reply.hijack() in onRequest is the only
+ * route-scoped way to keep the raw stream.
+ *
+ * Atomicity: the body goes to a sibling temp file with a UUID name and is
+ * promoted with rename() in the same directory. A failed or aborted upload
+ * unlinks the temp; the previous destination is never touched.
+ *
+ * @param {import('fastify').FastifyRequest} request
+ * @param {import('fastify').FastifyReply} reply
+ * @param {import('./paths.js').Vault} vault
+ * @param {number} bodyLimit
+ * @returns {Promise<void>}
+ */
+async function handleStreamingPut(request, reply, vault, bodyLimit) {
+  // Take the reply before the body parser is reached. Every exit path below
+  // writes through reply.raw; Fastify must not send anything itself.
+  reply.hijack();
+
+  const requested = vaultPathFromParams(request);
+  if (requested === '') {
+    sendRawJsonError(reply, 400, 'EINVAL', 'missing path');
+    return;
+  }
+
+  let resolved;
+  try {
+    resolved = await resolveVaultAbsolute(vault, toAbsoluteInput(requested));
+  } catch (err) {
+    sendRawFileError(reply, err);
+    return;
+  }
+
+  // Write through symlinks the way fs.writeFile did: rename onto the resolved
+  // target, not onto the link itself (renaming over a link would replace it).
+  const destination = resolved.real;
+  const tempPath = path.join(
+    path.dirname(destination),
+    `.${path.basename(destination)}.${randomUUID()}.myobs-upload`,
+  );
+
+  let renamed = false;
+  try {
+    await streamRequestBodyToFile(request, tempPath, bodyLimit);
+
+    // A client that vanished after the last chunk but before rename must not
+    // get a half-written upload promoted. (`complete` is not usable here:
+    // light-my-request's simulated body leaves it undefined, while
+    // readableAborted is defined by the stream itself.)
+    if (request.raw.readableAborted === true) {
+      return;
+    }
+
+    await fs.promises.rename(tempPath, destination);
+    renamed = true;
+  } catch (err) {
+    // The response socket is gone when the uploader disconnected; there is
+    // nobody to send the error to. The finally block still removes the temp.
+    const aborted =
+      /** @type {NodeJS.ErrnoException} */ (err)?.code === 'ECONNRESET' ||
+      request.raw.readableAborted === true ||
+      reply.raw.destroyed;
+    if (!aborted) sendRawFileError(reply, err);
+    return;
+  } finally {
+    if (!renamed) await fs.promises.rm(tempPath, { force: true }).catch(() => {});
+  }
+
+  // Recorded after the rename succeeded: a failed write must not leave a token
+  // behind that would tag the next external edit to this path.
+  const writeToken = request.headers['x-write-token'];
+  if (typeof writeToken === 'string' && writeToken !== '') {
+    recordOriginToken(resolved.rel, writeToken);
+  }
+
+  reply.raw.statusCode = 204;
+  reply.raw.end();
 }
 
 /**
@@ -279,32 +509,20 @@ export function registerFileRoutes(app, options) {
   app.get('/v/*', { exposeHeadRoute: false }, getOrHead);
   app.head('/v/*', getOrHead);
 
-  app.put('/v/*', { bodyLimit }, async (request, reply) => {
-    const requested = vaultPathFromParams(request);
-    if (requested === '') {
-      return sendJsonError(request, reply, 400, 'EINVAL', 'missing path');
-    }
-
-    try {
-      const resolved = await resolveVaultAbsolute(vault, toAbsoluteInput(requested));
-      const body = Buffer.isBuffer(request.body)
-        ? request.body
-        : request.body === undefined || request.body === null
-          ? Buffer.alloc(0)
-          : Buffer.from(String(request.body));
-
-      await fs.promises.writeFile(resolved.abs, body);
-      // Recorded after the write succeeded: a failed write must not leave a
-      // token behind that would tag the next external edit to this path.
-      // chokidar's awaitWriteFinish (300 ms) plus the 150 ms batch window
-      // guarantee the event is generated well after this line runs.
-      const writeToken = request.headers['x-write-token'];
-      if (typeof writeToken === 'string' && writeToken !== '') {
-        recordOriginToken(resolved.rel, writeToken);
-      }
-      return reply.code(204).send();
-    } catch (err) {
-      return sendFileError(request, reply, err);
-    }
-  });
+  /*
+   * reply.hijack() stops Fastify's lifecycle before the body parser, so the
+   * dummy handler below is unreachable; keeping it registered is what makes
+   * find-my-way route PUT /v/* here at all. The onRequest hook runs after the
+   * global onRequest hooks (AUTH_TOKEN), so hijacking cannot bypass auth.
+   */
+  app.put(
+    '/v/*',
+    {
+      bodyLimit,
+      onRequest: (request, reply) => handleStreamingPut(request, reply, vault, bodyLimit),
+    },
+    async () => {
+      // Unreachable: handleStreamingPut owns the reply from onRequest onward.
+    },
+  );
 }

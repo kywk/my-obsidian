@@ -87,6 +87,8 @@ my-obsidian/
 | 15 | `/api/fs` 契約 | 單一 `POST /api/fs`（`{op, path, args}`）+ `ifMtimeMs` 條件寫入；大檔走 `GET/PUT /v/<id>/<path>` |
 | 16 | WS 推播 | `awaitWriteFinish` + 150ms 批次聚合 + write-token 回音過濾 + `WATCH_DISABLED` 開關 |
 | 17 | Plugin `require` 白名單 | 見 §7 |
+| 18 | 後端斷線與重啟 | 前端主動偵測（`HEAD /` 輪詢 + fetch 失敗訊號 + WS 狀態）；**連續 2 次探測失敗**才離線（單次逾時不算，見 §11.13.1）；已知離線時變更類 op 直接 `EOFFLINE`、**不排隊不重試**；讀取僅在網路層失敗時重試一次；重連後以 `FileSystemAdapter.reconcileFile` 逐檔 reconcile（**不可用 `listAll()`**，見 §11.13）。驗收 `tools/resilience-check.mjs` 8/8 |
+| 19 | 使用者可見的失敗 | 全部經 `window.__MYOBS_NOTICES`；同 `dedupeKey` 合併累加；一次 conflict 一張卡；boot 期外掛失敗用狀態差集；fatal overlay 只抑制寫入類離線 rejection。驗收 `tools/notices-check.mjs` 10/10，見 §11.14 |
 
 ---
 
@@ -199,7 +201,7 @@ server config，再由此注入（契約欄位為 `termsText`，見 `CONTRACTS.m
 
 | 層 | 指令 | 項目數 | 涵蓋 |
 |---|---|---|---|
-| 單元 | `cd packages/server && npm test` | 219 | fs API、conflict、auth、consent、files/`/v/*`、watch token、proxy、plugins、static |
+| 單元 | `cd packages/server && npm test` | 251 | fs API、conflict、auth、consent、files/`/v/*`、watch token、proxy（含 DNS 硬化）、plugins、static、PUT 串流 |
 | 1 | `node tools/spike-check.mjs --vault <複本>` | 8 | boot、>5000 檔、metadata cache、文字往返、二進位往返、冷啟、workspace 隔離、零例外 |
 | 2 | `node tools/hotreload-check.mjs` | 4 | WS 連線、筆記外部變更、plugin 熱重載、回音過濾 |
 | 3 | `node tools/attachment-check.mjs` | 全部 | `/v/*` URL 形狀、位元組一致、瀏覽器實際解碼、Range、pdfjs、編碼檔名 |
@@ -208,6 +210,9 @@ server config，再由此注入（契約欄位為 `termsText`，見 `CONTRACTS.m
 | 6 | `node tools/print-check.mjs` | 19 | 只印筆記、PDF bytes、狀態還原、manifest、service worker、寬度切換 |
 | 7 | `node tools/dialog-check.mjs` | 14 | `remote.dialog`、FSA／合成路徑、Export to PDF 全鏈路、二次匯出狀態還原 |
 | 8 | `node tools/plugin-install-check.mjs` | 6 | **真實網路**：Browse（popout）→ 搜尋 → Install → Enable → Disable → Uninstall，含完整 proxy/fs 請求清單 |
+| 9 | `node tools/notices-check.mjs` | 10 | 三等級樣式、dedupe、自動消失、conflict（兩條路徑、單卡、點擊真的開副本）、外掛失敗合併 |
+| 10 | `node tools/resilience-check.mjs` | 8 | 後端重啟：離線偵測（<5s）、寫入明確失敗、離線期間新增檔案、重連（<15s）、reconcile、恢復儲存 |
+| 11 | `node tools/parity-check.mjs` | 8 | popout realm 的 runtime 腳本、避開雙實例、popout 匯出印自己的筆記、host 不受影響、popout 右鍵選單 |
 
 **全部只對 `~/kywk/obsidian` 的複本執行**，真實 vault 從未被寫入。
 
@@ -494,4 +499,71 @@ Uninstall → adapter.rmdir(dir, true) → /api/fs { op:"rmdir" }   ← 直接�
 **已知 fallback**：Obsidian 的 `QS()` 在 github/raw 失敗時會改打
 `https://releases.obsidian.md/proxy?url=…`。該 host 不在 allowlist，成功路徑不會用到；
 但 proxy 失敗時 fallback 會變瀏覽器直連並可能 CORS 失敗。列為決策點，尚未處理。
+
+### 11.13 後端重啟：先觀察，才發現症狀與我原本的假設相反
+
+我原本的假設是「斷線時 Obsidian 的 UI 看不出來，所以要自己做提示」。**實測推翻了一半：**
+
+- **編輯器打字後存檔失敗**：Obsidian **自己會**跳 notice
+  （`Failed to save file "…". … Make a backup of the contents of this file now to avoid losing data.`），
+  而且 dirty 狀態正確保留（`view.lastSavedData !== editor.getValue()`）。
+  **但同一個 rejection 沒有 handler，被 `index.html` 的 `unhandledrejection` 攔截器變成全螢幕
+  fatal overlay，把整個 app 蓋住。** 真正的症狀不是「沒有訊息」，是「有訊息但被我們自己的錯誤畫面吃掉」。
+- **直接呼叫 `app.vault.modify()`**：完全靜默 —— Promise reject `EIO`，
+  零 UI 訊息、零 console、零 unhandled rejection，磁碟不變。
+
+**重連後不會自動補狀態**：WS 由 watch-shim 退避重連（實測第 4.1 秒），
+但**檔案列表不會更新** —— 離線期間從磁碟新增的檔案，重連 +4 秒後在 `app.vault.getFiles()` 仍然是 0。
+
+**選用 `FileSystemAdapter.reconcileFile`，不用 `listAll()`**（bundle offset 565222）：
+
+```js
+listAll() { this.files = {}; return this.listRecursive(""); }   // ← 先清空
+```
+
+`listAll()` 會把 `files` 清空再重走一次目錄樹，於是每個既有檔案都變成 `file-created`；
+`Vault.onChange` 對 `file-created` 不檢查既有節點，會把第二個 abstract file 塞進同一資料夾 →
+**重複節點、樹狀結構損壞**。`adapter.watch()` 內部也是 `listAll()`，同樣不可用。
+
+因此實作改為自己走訪目錄、以 mtime/size 比對 `adapter.files`，
+只對新增／變更的路徑呼叫 `reconcileFile`，刪除在完整走訪成功後才處理
+（走訪失敗絕不誤判為刪除），hidden 路徑依 bundle 的 `Al()` 規則跳過。
+成本：10,036 檔 / **4.2 秒** / 併發 8。
+
+**離線閘門**：已知離線時所有變更類 op 在 shim 直接以 `EOFFLINE` 拒絕，**不排隊、不重試**
+（寫入帶 `ifMtimeMs`，盲目重試會產生假衝突或覆蓋）。讀取只在網路層失敗時重試一次。
+錯誤訊息固定含「後端中斷，這次修改沒有存到磁碟」。
+
+**fatal overlay 抑制**：只針對寫入類的 `EOFFLINE` / `ECONNREFUSED` unhandled rejection，
+記錄為 `fatal-suppressed`。讀取與啟動錯誤仍然顯示 fatal。
+
+#### 11.13.1 probe 逾時不可直接判定離線（實作後才發現的產品缺陷）
+
+第一版的健康探測是 `HEAD /?myobs-probe=…`，2.5 秒 `AbortController` 逾時，
+**一次失敗就 `markOffline`**。這在負載下會誤判：冷啟要發 19,000+ 個 fs 請求、
+匯出要渲染 700 KB 的 PDF，探測就會逾時 —— 於是使用者的存檔被 `EOFFLINE` 擋掉，
+並被告知「這次修改沒有存到磁碟」，而伺服器從頭到尾都是健康的。
+
+實際觀測到：`attachment-check` 在負載下看到 **4 次被 abort 的 probe**。
+
+修正：**連續 2 次探測失敗**才關閘門，逾時放寬到 5 秒。實測離線偵測從 0.86 秒變成 **1.88 秒**
+（驗收門檻 5 秒，仍有餘裕），而負載下的誤判消失。
+
+> 三個獨立工作流各自踩到這件事：`attachment-check` 把它算成網路失敗（已排除 probe URL，
+> 並順手修掉「用 lastRequestUrl 歸因失敗請求」的錯誤 —— 要用 `requestId` 對應）。
+
+### 11.14 通知層：一次失敗一張卡，而且按鈕不能製造垃圾
+
+- 三個等級各有相異的 computed border；`info` 8 秒、`warn` 20 秒、`error` 不自動消失。
+- **同 `dedupeKey` 合併累加 count**，不疊卡。一次 conflict 只產生一張卡（count 1）：
+  `fs-shim` 是主要 producer，`notices.js` 的 `__MYOBS_LAST_CONFLICT` bridge 只在其缺席時補卡
+  （同 key 已存在則記 `conflict-delegated`）。
+- **boot 期外掛失敗用狀態差集偵測**（`enabledPlugins − plugins`），**不 patch `console.error`**
+  —— 那太脆弱且會把除錯訊息變成 UI 噪音。
+  已知盲區：`onload` 在實例建立後才拋錯的外掛（如 `templater`）會留在 `plugins` 裡，差集看不到。
+- **`workspace.openLinkText()` 不可用來開檔案**：連結目標尚未進入 vault index 時
+  （conflict 副本只有約 1 秒大），它會 fall through 到 `fileManager.createNewFile()`，
+  在 vault 裡種出 **0 byte 筆記** —— 按下「顯示保留的舊版本」反而製造垃圾檔。
+  必須用 `getAbstractFileByPath` / `getFirstLinkpathDest` 解析後 `leaf.openFile()`，
+  找不到就誠實說找不到。這個 bug 在 stress 中被 `copiesOnDisk` 掃描抓到。
 

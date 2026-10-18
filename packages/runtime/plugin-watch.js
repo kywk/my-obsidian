@@ -22,6 +22,15 @@
 	var DEFER_MAX_MS = 30000;
 	var APP_WAIT_MS = 60000;
 	var APP_POLL_MS = 100;
+	var BOOT_POLL_MS = 500;
+	// A plugin manager is "settled" when neither the enabled set nor the loaded
+	// set has moved for this long. Plugin onload is async and sequential, so a
+	// shorter window reports slow plugins as failures.
+	var BOOT_SETTLE_MS = 2500;
+	// layoutReady is the normal end-of-boot signal; the fallback covers a boot
+	// that never reaches it (headless or fatal later in startup).
+	var BOOT_FALLBACK_MS = 20000;
+	var BOOT_MAX_MS = 120000;
 	var EVENTS_MAX = 200;
 
 	var PLUGIN_PATH = /^\.obsidian\/plugins\/([^/]+)\/(.+)$/;
@@ -76,6 +85,136 @@
 		if (events.length > EVENTS_MAX) {
 			events.splice(0, events.length - EVENTS_MAX);
 		}
+	}
+
+	// ---------------------------------------------------------------------
+	// User-visible failures
+	// ---------------------------------------------------------------------
+
+	function notices() {
+		var api = window.__MYOBS_NOTICES;
+		return api && typeof api.push === "function" ? api : null;
+	}
+
+	function messageOf(error) {
+		if (!error) return "未知錯誤";
+		if (error.message) return String(error.message);
+		return String(error);
+	}
+
+	function stackOf(error) {
+		if (error && typeof error.stack === "string" && error.stack !== "") {
+			return error.stack;
+		}
+		return null;
+	}
+
+	function notify(level, message, detail, dedupeKey, actions) {
+		try {
+			var api = notices();
+			if (!api) return;
+			var payload = {
+				level: level,
+				source: "plugin",
+				message: message,
+				detail: detail,
+				dedupeKey: dedupeKey
+			};
+			if (actions && actions.length) payload.actions = actions;
+			api.push(payload);
+		} catch (err) {
+			// A notice must never become the reason a reload fails.
+		}
+	}
+
+	function dismissPluginNotices(id) {
+		try {
+			var api = notices();
+			if (!api || typeof api.list !== "function" || typeof api.dismiss !== "function") {
+				return;
+			}
+			var key = "plugin:" + id;
+			var items = api.list();
+			for (var i = 0; i < items.length; i += 1) {
+				if (items[i].dedupeKey === key) api.dismiss(items[i].id);
+			}
+		} catch (err) {
+			// Dismissal is cosmetic; never let it escape.
+		}
+	}
+
+	function disablePlugin(id) {
+		var plugins = pluginManager();
+		if (!plugins || typeof plugins.disablePluginAndSave !== "function") return;
+		Promise.resolve()
+			.then(function () {
+				return plugins.disablePluginAndSave(id);
+			})
+			.then(
+				function () {
+					record(id, "disable", "disable", true, null);
+					dismissPluginNotices(id);
+					notify("info", "已停用外掛「" + id + "」", null, "plugin-disabled:" + id);
+				},
+				function (err) {
+					record(id, "disable", "disable", false, err);
+					notify(
+						"error",
+						"停用外掛「" + id + "」失敗：" + messageOf(err),
+						stackOf(err),
+						"plugin-disable-failed:" + id
+					);
+				}
+			);
+	}
+
+	/**
+	 * `disablePluginAndSave` is PluginManager's own "user turned this off"
+	 * path: it drops the id from enabledPlugins and rewrites
+	 * community-plugins.json, so a plugin that throws on every load stops
+	 * being retried at the next boot. The card offers it because a plugin that
+	 * fails during onload is otherwise only fixable through Settings.
+	 */
+	function buildActions(id) {
+		var plugins = pluginManager();
+		if (!plugins || typeof plugins.disablePluginAndSave !== "function") return [];
+		if (!isEnabled(plugins, id)) return [];
+		return [
+			{
+				label: "停用此外掛",
+				onClick: function () {
+					disablePlugin(id);
+				}
+			}
+		];
+	}
+
+	/**
+	 * Report a load/reload failure through the notice surface. `context` is
+	 * "boot" or "reload"; both use the same dedupeKey so a plugin that keeps
+	 * failing every 400 ms collapses into one card with a count.
+	 */
+	function reportFailure(id, file, error, context) {
+		var reason = messageOf(error);
+		var detail = stackOf(error);
+		if (context === "boot") {
+			detail = [
+				"外掛：" + id,
+				"狀態：已啟用（community-plugins.json）但 app.plugins.plugins 沒有實例。",
+				"",
+				"可能原因：onload 拋錯、manifest.json／main.js 缺失、版本或 policy 不相容。",
+				"Obsidian 自己會在 console 印出 \"Plugin failure: " + id + "\" 與原始堆疊。"
+			].join("\n");
+		}
+		notify(
+			"error",
+			(context === "boot"
+				? "外掛「" + id + "」啟動時未載入："
+				: "外掛「" + id + "」重新載入失敗" + (file ? "（" + file + "）" : "") + "：") + reason,
+			detail,
+			"plugin:" + id,
+			buildActions(id)
+		);
 	}
 
 	// ---------------------------------------------------------------------
@@ -149,19 +288,18 @@
 				 * Naming it here saves the next person an afternoon.
 				 */
 				var policy = (window.__MYOBS && window.__MYOBS.policy) || {};
-				record(
-					id,
-					file,
-					"reload",
-					false,
-					"enablePlugin did not load the plugin (policy.plugins=" +
-						JSON.stringify(policy.plugins) + ")"
-				);
+				var reason =
+					"enablePlugin 未建立外掛實例（policy.plugins=" +
+					JSON.stringify(policy.plugins) + "）";
+				record(id, file, "reload", false, reason);
+				reportFailure(id, file, new Error(reason), "reload");
 			} else {
 				record(id, file, "reload", true, null);
+				dismissPluginNotices(id);
 			}
 		} catch (err) {
 			record(id, file, "reload", false, err);
+			reportFailure(id, file, err, "reload");
 		}
 	}
 
@@ -265,6 +403,147 @@
 	}
 
 	// ---------------------------------------------------------------------
+	// Boot-time load failures
+	//
+	// Nothing in the renderer reports "this plugin was enabled but never came
+	// up" (Obsidian's own toast for it is transient and fires per attempt).
+	// The state comparison below is the reliable observation point: after the
+	// plugin manager has settled, `enabledPlugins` minus `plugins` is exactly
+	// the set that failed to load. console.error is deliberately NOT patched --
+	// it throws away signal and would turn unrelated noise into UI cards.
+	// ---------------------------------------------------------------------
+
+	function enabledIds(plugins) {
+		var out = [];
+		try {
+			var enabled = plugins && plugins.enabledPlugins;
+			if (enabled && typeof enabled.forEach === "function") {
+				enabled.forEach(function (id) {
+					out.push(String(id));
+				});
+			} else if (Array.isArray(enabled)) {
+				enabled = enabled.slice();
+				for (var i = 0; i < enabled.length; i += 1) out.push(String(enabled[i]));
+			}
+		} catch (err) {
+			return [];
+		}
+		out.sort();
+		return out;
+	}
+
+	function reconcileBootFailures(plugins, enabled) {
+		var loaded = plugins.plugins || {};
+		var failed = enabled.filter(function (id) {
+			return !loaded[id];
+		});
+
+		// policy.plugins is Obsidian's own gate (`policyAllows`). A missing or
+		// non-array value means every community plugin was refused, which is
+		// one root cause, not one failure per plugin (DESIGN.md §11.3).
+		var policy = (window.__MYOBS && window.__MYOBS.policy) || {};
+		var allowed = policy.plugins;
+		if (allowed !== true) {
+			if (Array.isArray(allowed)) {
+				failed = failed.filter(function (id) {
+					return allowed.indexOf(id) !== -1;
+				});
+			} else {
+				record("*", "*", "boot-policy", false, "policy.plugins=" + JSON.stringify(allowed));
+				notify(
+					"error",
+					"所有社群外掛都未載入：__MYOBS.policy.plugins 不是 true",
+					"enablePlugin() 第一行就以 policyAllows(policy.plugins, id) 擋掉每個社群外掛，且沒有錯誤訊息。\n" +
+						"請確認 server 注入的 __MYOBS.policy（packages/server/src/index.js 的 DEFAULT_POLICY）；" +
+						"詳見 docs/DESIGN.md §11.3。\n\n目前值：" + JSON.stringify(allowed),
+					"plugin-policy"
+				);
+				return;
+			}
+		}
+
+		// isDesktopOnly plugins are skipped on mobile by design, not broken.
+		var platform = window.Platform;
+		if (platform && platform.isDesktopApp === false) {
+			var manifests = plugins.manifests || {};
+			failed = failed.filter(function (id) {
+				var manifest = manifests[id];
+				return !(manifest && manifest.isDesktopOnly === true);
+			});
+		}
+
+		for (var i = 0; i < failed.length; i += 1) {
+			record(failed[i], "boot", "boot", false, "enabled but not loaded");
+			reportFailure(failed[i], "boot", new Error("已啟用但未建立外掛實例"), "boot");
+		}
+		record(
+			"*",
+			"*",
+			"boot-scan",
+			true,
+			"failed=" + failed.length + " of " + enabled.length
+		);
+	}
+
+	function startBootCheck() {
+		var startedAt = Date.now();
+		var lastSignature = null;
+		var lastChangeAt = Date.now();
+		var done = false;
+		var timer = setInterval(function () {
+			if (done) {
+				clearInterval(timer);
+				return;
+			}
+			try {
+				var plugins = pluginManager();
+				var app = window.app;
+				if (!plugins || !app) return;
+
+				var enabled = enabledIds(plugins);
+				var loaded = Object.keys(plugins.plugins || {}).sort();
+				var manifests = Object.keys(plugins.manifests || {}).length;
+				var loading = plugins.loadingPluginId || null;
+				var restricted =
+					typeof plugins.isEnabled === "function" && plugins.isEnabled() !== true;
+
+				var signature =
+					enabled.join("|") + "::" + loaded.join("|") + "::" +
+					String(loading) + "::" + manifests;
+				if (signature !== lastSignature) {
+					lastSignature = signature;
+					lastChangeAt = Date.now();
+				}
+
+				var layoutReady = !!(app.workspace && app.workspace.layoutReady === true);
+				var settled = loading === null && Date.now() - lastChangeAt >= BOOT_SETTLE_MS;
+				var ready = layoutReady || Date.now() - startedAt >= BOOT_FALLBACK_MS;
+				// With an empty enabled set there is nothing to load, so an
+				// empty manifest map is a legitimate final state.
+				var hasWork = enabled.length === 0 || manifests > 0;
+
+				if (settled && ready && hasWork) {
+					done = true;
+					clearInterval(timer);
+					if (restricted) {
+						record("*", "*", "boot-scan", true, "community plugins are off");
+						return;
+					}
+					reconcileBootFailures(plugins, enabled);
+				} else if (Date.now() - startedAt >= BOOT_MAX_MS) {
+					done = true;
+					clearInterval(timer);
+					record("*", "*", "boot-scan-abandoned", false, "not settled within 120s");
+				}
+			} catch (err) {
+				done = true;
+				clearInterval(timer);
+				record("*", "*", "boot-scan", false, err);
+			}
+		}, BOOT_POLL_MS);
+	}
+
+	// ---------------------------------------------------------------------
 	// Bootstrap
 	// ---------------------------------------------------------------------
 
@@ -294,6 +573,11 @@
 				start();
 			} catch (err) {
 				console.warn("[my-obsidian] plugin watch failed to start", err);
+			}
+			try {
+				startBootCheck();
+			} catch (err) {
+				console.warn("[my-obsidian] boot plugin check failed to start", err);
 			}
 			return;
 		}

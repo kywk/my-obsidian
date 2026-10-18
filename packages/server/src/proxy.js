@@ -11,7 +11,9 @@
  * {@link PROXY_ALLOWED_HOSTS}, no credentials in the URL, no localhost or
  * private-IP literals. Redirects are followed manually and re-validated on every
  * hop, because a trusted host could otherwise redirect the proxy into the
- * private network.
+ * private network. Each hop's hostname is also resolved and refused when any
+ * answer is private or reserved (DNS rebinding). That lookup is a mitigation,
+ * not a guarantee: fetch resolves the name again, so this is TOCTOU-able.
  *
  * Responses are streamed, not buffered. A response over the byte cap is
  * rejected before the first byte whenever Content-Length announces it, and the
@@ -19,6 +21,7 @@
  * point; there is no way to turn a partially delivered 200 into a 502).
  */
 
+import dns from 'node:dns/promises';
 import { Readable } from 'node:stream';
 
 /**
@@ -99,20 +102,125 @@ export function normalizeHostname(hostname) {
 }
 
 /**
+ * Parse a dotted-quad IPv4 literal.
+ *
+ * @param {string} address
+ * @returns {number[] | null} four octets, or null when this is not IPv4
+ */
+function ipv4Octets(address) {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(address);
+  if (match === null) return null;
+  const octets = match.slice(1).map(Number);
+  return octets.every((value) => value >= 0 && value <= 255) ? octets : null;
+}
+
+/**
  * @param {string} host
  * @returns {boolean}
  */
 function isPrivateIpv4(host) {
-  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (match === null) return false;
-  const [a, b] = [Number(match[1]), Number(match[2])];
+  const octets = ipv4Octets(host);
+  if (octets === null) return false;
+  const [a, b, c] = octets;
   if (a === 0 || a === 10 || a === 127) return true;
   if (a === 169 && b === 254) return true; // link-local
   if (a === 172 && b >= 16 && b <= 31) return true;
   if (a === 192 && b === 168) return true;
   if (a === 100 && b >= 64 && b <= 127) return true; // carrier-grade NAT
-  if (a === 198 && (b === 18 || b === 19)) return true;
+  if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking
+  if (a === 192 && b === 0 && c === 0) return true; // IETF assignments
+  if (a === 192 && b === 0 && c === 2) return true; // TEST-NET-1
+  if (a === 198 && b === 51 && c === 100) return true; // TEST-NET-2
+  if (a === 203 && b === 0 && c === 113) return true; // TEST-NET-3
   if (a >= 224) return true; // multicast, reserved, broadcast
+  return false;
+}
+
+/**
+ * Expand an IPv6 literal into eight 16-bit groups.
+ *
+ * Handles `::` compression, a trailing dotted-quad (`::ffff:127.0.0.1`) and a
+ * zone identifier (`fe80::1%en0`). Returns null for anything that is not a
+ * valid IPv6 literal.
+ *
+ * @param {string} address
+ * @returns {number[] | null}
+ */
+function ipv6Groups(address) {
+  let text = String(address).toLowerCase();
+  const zone = text.indexOf('%');
+  if (zone !== -1) text = text.slice(0, zone);
+  if (!text.includes(':')) return null;
+
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+
+  /** @param {string} part */
+  const expand = (part) => {
+    if (part === '') return [];
+    const raw = part.split(':');
+    const out = [];
+    for (let i = 0; i < raw.length; i += 1) {
+      const group = raw[i];
+      if (group.includes('.')) {
+        // A dotted quad is only legal as the final 32 bits.
+        if (i !== raw.length - 1) return null;
+        const octets = ipv4Octets(group);
+        if (octets === null) return null;
+        out.push((octets[0] << 8) | octets[1], (octets[2] << 8) | octets[3]);
+        continue;
+      }
+      if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
+      out.push(Number.parseInt(group, 16));
+    }
+    return out;
+  };
+
+  const head = expand(halves[0]);
+  const tail = halves.length === 2 ? expand(halves[1]) : [];
+  if (head === null || tail === null) return null;
+
+  if (halves.length === 1) return head.length === 8 ? head : null;
+  // `::` must stand for at least one zero group.
+  if (head.length + tail.length > 7) return null;
+  return head.concat(new Array(8 - head.length - tail.length).fill(0), tail);
+}
+
+/**
+ * Private/reserved IPv6 ranges, including addresses that embed an IPv4 target.
+ *
+ * @param {string} address
+ * @returns {boolean}
+ */
+function isPrivateIpv6(address) {
+  const groups = ipv6Groups(address);
+  if (groups === null) return false;
+
+  // ::ffff:0:0/96 (IPv4-mapped) and ::/96 (unspecified, loopback, deprecated
+  // IPv4-compatible) carry an IPv4 address in the last two groups.
+  if (groups.slice(0, 5).every((value) => value === 0)) {
+    if (groups[5] === 0xffff) {
+      return isPrivateIpv4(
+        `${groups[6] >> 8}.${groups[6] & 0xff}.${groups[7] >> 8}.${groups[7] & 0xff}`,
+      );
+    }
+    if (groups[5] === 0) {
+      if (groups[6] === 0 && groups[7] <= 1) return true; // :: and ::1
+      return isPrivateIpv4(
+        `${groups[6] >> 8}.${groups[6] & 0xff}.${groups[7] >> 8}.${groups[7] & 0xff}`,
+      );
+    }
+  }
+
+  if ((groups[0] & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
+  if ((groups[0] & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+  if ((groups[0] & 0xff00) === 0xff00) return true; // ff00::/8 multicast
+  if (groups[0] === 0x2001 && groups[1] === 0x0db8) return true; // documentation
+  if (groups[0] === 0x2001 && groups[1] === 0x0000) return true; // Teredo
+  if (groups[0] === 0x2002) return true; // 6to4 (embeds an IPv4 target)
+  if (groups[0] === 0x0100 && groups.slice(1, 4).every((value) => value === 0)) {
+    return true; // 100::/64 discard-only
+  }
   return false;
 }
 
@@ -124,18 +232,80 @@ function isPrivateAddress(host) {
   if (host === 'localhost' || host.endsWith('.localhost')) return true;
   if (isPrivateIpv4(host)) return true;
   if (!host.includes(':')) return false;
+  return isPrivateIpv6(host);
+}
 
-  // IPv6 literal (URL.hostname keeps the brackets for IPv6; normalizeHostname
-  // strips them). All IPv6 literals fail the allowlist anyway; this only makes
-  // the rejection reason accurate.
-  if (host === '::' || host === '::1') return true;
-  if (/^f[cd][0-9a-f]{2}:/.test(host)) return true; // fc00::/7 unique local
-  if (/^fe[89ab][0-9a-f]:/.test(host)) return true; // fe80::/10 link-local
-  if (host.startsWith('::ffff:')) {
-    const tail = host.slice('::ffff:'.length);
-    return tail.includes('.') ? isPrivateIpv4(tail) : true;
+/**
+ * The address check above only covers URL *literals*. A hostname on the
+ * allowlist can still resolve to 127.0.0.1 (DNS rebinding), so every hop is
+ * resolved and rejected when any answer is private or reserved.
+ *
+ * This is a mitigation, not a defence: `fetch` resolves the name again after
+ * this check, so a resolver that answers differently on the second query wins
+ * (TOCTOU). Pinning the checked address into the connection would require a
+ * custom dispatcher; the proxy API has no such hook. Keep the check short-lived
+ * (one lookup per hop, never cached) so a poisoned answer has to be served on
+ * two consecutive queries.
+ *
+ * @param {URL} url
+ * @param {object} policy
+ * @param {boolean} [policy.allowHttp] Test-only: local fake upstreams.
+ * @param {(hostname: string, options: object) => Promise<Array<{address: string, family: number}>>} [policy.lookupImpl]
+ * @param {number} [policy.timeoutMs]
+ * @returns {Promise<Array<{address: string, family: number}>>}
+ * @throws {ProxyError}
+ */
+export async function assertPublicResolution(url, policy = {}) {
+  // Tests point the proxy at a local HTTP server; that mode exists to make the
+  // proxy mechanics testable and is never enabled by the production config.
+  if (policy.allowHttp === true) return [];
+
+  const host = normalizeHostname(url.hostname);
+  const lookupImpl = policy.lookupImpl ?? ((name, options) => dns.lookup(name, options));
+  const timeoutMs = Number.isFinite(policy.timeoutMs) ? Number(policy.timeoutMs) : PROXY_TIMEOUT_MS;
+
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    // Not unref'd on purpose: a resolver that never answers must still fire
+    // this deadline even when nothing else is pending (and it keeps a test
+    // harness that stubs a hanging resolver alive long enough to observe it).
+    timer = setTimeout(() => {
+      reject(new ProxyError(504, 'ETIMEDOUT', `DNS lookup for ${host} exceeded ${timeoutMs} ms`));
+    }, timeoutMs);
+  });
+
+  let addresses;
+  try {
+    addresses = await Promise.race([
+      lookupImpl(host, { all: true, verbatim: true }),
+      timeout,
+    ]);
+  } catch (err) {
+    if (err instanceof ProxyError) throw err;
+    throw new ProxyError(
+      502,
+      'EBADGATEWAY',
+      `DNS lookup failed for ${host}: ${/** @type {Error} */ (err)?.message ?? String(err)}`,
+    );
+  } finally {
+    clearTimeout(timer);
   }
-  return false;
+
+  if (!Array.isArray(addresses) || addresses.length === 0) {
+    throw new ProxyError(502, 'EBADGATEWAY', `DNS lookup returned no addresses for ${host}`);
+  }
+
+  for (const entry of addresses) {
+    const address = normalizeHostname(String(entry?.address ?? ''));
+    if (isPrivateAddress(address)) {
+      throw new ProxyError(
+        403,
+        'EPERM',
+        `host "${host}" resolves to a private or reserved address (${address}); refusing a DNS-rebinding target`,
+      );
+    }
+  }
+  return addresses;
 }
 
 /**
@@ -218,12 +388,16 @@ export function validateProxyUrl(raw, options = {}) {
  * @param {(input: string, init: object) => Promise<Response>} context.fetchImpl
  * @param {AbortSignal} context.signal
  * @param {Record<string, string>} context.headers
- * @param {object} context.policy
+ * @param {object} context.policy See assertPublicResolution().
  * @returns {Promise<{ response: Response, url: URL }>}
  */
 async function followRedirects(start, context) {
   let current = start;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    // Re-resolve on every hop: a trusted host may redirect to another trusted
+    // host whose DNS answer points into the private network. No caching, so an
+    // attacker cannot pin a "public" answer from an earlier request.
+    await assertPublicResolution(current, context.policy);
     const response = await context.fetchImpl(current.href, {
       method: 'GET',
       headers: context.headers,
@@ -299,7 +473,11 @@ function sendProxyError(reply, err) {
  *   may legitimately take longer, but a stalled socket is aborted.
  * @param {number} [options.maxBytes]
  * @param {Iterable<string>} [options.allowedHosts] Test-only.
- * @param {boolean} [options.allowHttp] Test-only (local fake upstreams).
+ * @param {boolean} [options.allowHttp] Test-only (local fake upstreams). Also
+ *   disables the DNS private-address check, because those fake upstreams
+ *   deliberately listen on 127.0.0.1.
+ * @param {(hostname: string, options: object) => Promise<Array<{address: string, family: number}>>} [options.lookupImpl]
+ *   Test-only DNS seam; defaults to node:dns/promises.lookup.
  * @returns {void}
  */
 export function registerProxyRoutes(app, options = {}) {
@@ -313,6 +491,8 @@ export function registerProxyRoutes(app, options = {}) {
   const policy = {
     allowedHosts: options.allowedHosts,
     allowHttp: options.allowHttp === true,
+    lookupImpl: options.lookupImpl,
+    timeoutMs,
   };
 
   app.get('/api/proxy', async (request, reply) => {

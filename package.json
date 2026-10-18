@@ -21,6 +21,9 @@
     "check:menu": "node tools/menu-check.mjs",
     "check:print": "node tools/print-check.mjs",
     "check:dialog": "node tools/dialog-check.mjs",
-    "check:plugin-install": "node tools/plugin-install-check.mjs"
+    "check:plugin-install": "node tools/plugin-install-check.mjs",
+    "check:notices": "node tools/notices-check.mjs",
+    "check:resilience": "node tools/resilience-check.mjs",
+    "check:parity": "node tools/parity-check.mjs"
   }
 }

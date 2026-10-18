@@ -190,7 +190,14 @@
 		EPERM: -1,
 		EIO: -5,
 		ENOTSUP: -45,
-		ECONFLICT: -409
+		ECONFLICT: -409,
+		/*
+		 * Transport-level codes, not Node errno values. Both exist so callers
+		 * can distinguish "the server said no" (EIO / ENOENT / ... on an HTTP
+		 * response) from "there was no server to answer".
+		 */
+		ECONNREFUSED: -111,
+		EOFFLINE: -100
 	};
 
 	function fsError(code, message, path) {
@@ -200,10 +207,6 @@
 		err.syscall = "";
 		err.path = path;
 		return err;
-	}
-
-	function isNodeError(value) {
-		return !!(value && typeof value === "object" && typeof value.code === "string");
 	}
 
 	// ---------------------------------------------------------------------
@@ -347,6 +350,146 @@
 		utimes: true
 	};
 
+	/*
+	 * A read may be retried once, but only when the request never reached a
+	 * server. Anything that produced an HTTP response is an answer, not a
+	 * transport failure, and repeating it would just repeat the same 4xx/5xx.
+	 *
+	 * Writes are never retried. Every write carries ifMtimeMs; a blind retry
+	 * after a response was lost can either create a bogus conflict copy (the
+	 * first write actually landed) or overwrite a newer external edit.
+	 */
+	var RETRYABLE_READS = {
+		read: true,
+		readBinary: true,
+		stat: true,
+		list: true,
+		exists: true,
+		access: true,
+		realpath: true
+	};
+
+	function offlineNow() {
+		var resilience = window.__MYOBS_RESILIENCE;
+		return !!(resilience && resilience.online === false);
+	}
+
+	function resilienceCall(name, args) {
+		try {
+			var resilience = window.__MYOBS_RESILIENCE;
+			var fn = resilience && resilience[name];
+			if (typeof fn === "function") fn.apply(resilience, args);
+		} catch (err) {
+			/* diagnostics must never break the fs path */
+		}
+	}
+
+	function transportError(op, path, blocked, cause) {
+		var where = path == null || path === "" ? "/" : String(path);
+		var write = TOKEN_OPS[op] === true;
+		var message;
+		if (write) {
+			/*
+			 * This wording is a contract with the operator: after a failed
+			 * save the first question is always "did my text reach the disk?".
+			 */
+			message =
+				"後端中斷，這次修改沒有存到磁碟（" +
+				op +
+				" " +
+				where +
+				"）。請確認 my-obsidian server 正在執行；恢復連線後請重新儲存。";
+		} else {
+			message =
+				"後端中斷，讀取失敗（" +
+				op +
+				" " +
+				where +
+				"）。請確認 my-obsidian server 正在執行。";
+		}
+		var err = fsError(blocked ? "EOFFLINE" : "ECONNREFUSED", message, path);
+		err.myobs = {
+			op: op,
+			path: where,
+			write: write,
+			network: true,
+			blocked: blocked === true
+		};
+		if (cause) err.cause = cause;
+		return err;
+	}
+
+	function httpError(op, path, status, info) {
+		var err = fsError(
+			(info && info.code) || "EIO",
+			(info && info.message) || ("fs op '" + op + "' failed with HTTP " + status),
+			path
+		);
+		err.status = status;
+		err.myobs = {
+			op: op,
+			path: path == null ? "" : String(path),
+			write: TOKEN_OPS[op] === true,
+			network: false,
+			httpStatus: status
+		};
+		return err;
+	}
+
+	function finalizeNetworkError(err, op, path) {
+		resilienceCall("noteNetworkFailure", [op, path]);
+		if (TOKEN_OPS[op] === true) {
+			resilienceCall("noteWriteBlocked", [op, path, err && err.cause ? String(err.cause) : "network"]);
+		}
+		return err;
+	}
+
+	function postOnce(fetchFn, op, path, payload) {
+		return fetchFn("/api/fs", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			credentials: "same-origin",
+			body: JSON.stringify(payload)
+		}).then(
+			function (response) {
+				return response.text().then(
+					function (text) {
+						var json = null;
+						try {
+							json = text ? JSON.parse(text) : null;
+						} catch (err) {
+							/*
+							 * A proxy that is up but not forwarding to the
+							 * backend returns HTML; that is an HTTP-level
+							 * failure, not a transport failure.
+							 */
+							throw httpError(op, path, response.status, {
+								code: "EIO",
+								message:
+									"invalid JSON from /api/fs (" +
+									op +
+									"): " +
+									String(text).slice(0, 200)
+							});
+						}
+
+						if (!json || json.ok !== true) {
+							throw httpError(op, path, response.status, (json && json.error) || {});
+						}
+						return json.result;
+					},
+					function (err) {
+						// Body read failed: the connection died mid-response.
+						throw transportError(op, path, false, err);
+					}
+				);
+			},
+			function (err) {
+				throw transportError(op, path, false, err);
+			}
+		);
+	}
+
 	function api(op, path, args) {
 		/*
 		 * Echo tagging for /api/watch. This is the single transport-level
@@ -376,6 +519,19 @@
 			}
 		}
 
+		/*
+		 * The offline gate belongs here for the same reason the concurrency
+		 * limit does: every caller funnels through this function. It is
+		 * deliberately a hard failure, not a queue. A queued write would fire
+		 * at an arbitrary later moment with an ifMtimeMs measured before the
+		 * outage, which is exactly the "looks saved, disk disagrees" failure
+		 * this workstream exists to remove.
+		 */
+		if (TOKEN_OPS[op] === true && offlineNow()) {
+			resilienceCall("noteWriteBlocked", [op, path, "offline"]);
+			return Promise.reject(transportError(op, path, true, null));
+		}
+
 		var payload = { op: op, path: path };
 		if (args !== undefined) payload.args = args;
 
@@ -385,45 +541,17 @@
 		}
 
 		return withSlot(function () {
-			return fetchFn("/api/fs", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			credentials: "same-origin",
-			body: JSON.stringify(payload)
-		}).then(
-			function (response) {
-				return response.text().then(function (text) {
-					var json = null;
-					try {
-						json = text ? JSON.parse(text) : null;
-					} catch (err) {
-						throw fsError(
-							"EIO",
-							"invalid JSON from /api/fs (" + op + "): " + String(text).slice(0, 200),
-							path
-						);
-					}
-
-					if (!json || json.ok !== true) {
-						var info = (json && json.error) || {};
-						throw fsError(
-							info.code || (response.ok ? "EIO" : "EIO"),
-							info.message || ("fs op '" + op + "' failed with HTTP " + response.status),
-							path
-						);
-					}
-					return json.result;
+			return postOnce(fetchFn, op, path, payload).catch(function (err) {
+				var network = !!(err && err.myobs && err.myobs.network === true);
+				if (!network) throw err;
+				if (RETRYABLE_READS[op] !== true) {
+					throw finalizeNetworkError(err, op, path);
+				}
+				return postOnce(fetchFn, op, path, payload).catch(function (second) {
+					if (!second || !second.myobs || second.myobs.network !== true) throw second;
+					throw finalizeNetworkError(second, op, path);
 				});
-			},
-			function (err) {
-				if (isNodeError(err)) throw err;
-				throw fsError(
-					"EIO",
-					"network error during fs op '" + op + "': " + (err && err.message ? err.message : err),
-					path
-				);
-			}
-			);
+			});
 		});
 	}
 
@@ -785,6 +913,80 @@
 				"[my-obsidian] concurrent write detected; previous version saved as " +
 				result.conflictSavedAs
 			);
+			/*
+			 * DESIGN.md §5 requires the user to be told. The console entry and
+			 * __MYOBS_LAST_CONFLICT only help whoever opens devtools; a silent
+			 * conflict copy means the user keeps editing a file believing the
+			 * other version is gone.
+			 *
+			 * The dedupeKey is shared on purpose with notices.js' conflict
+			 * bridge (it consumes __MYOBS_LAST_CONFLICT with
+			 * "fs:conflict:<path>"). Setting the field above already pushed
+			 * one card; pushing the same key here replaces its message with
+			 * this module's wording instead of stacking a second card.
+			 */
+			try {
+				var conflictActions = [];
+				try {
+					if (window.app && window.app.workspace) {
+						conflictActions.push({
+							label: "顯示保留的舊版本",
+							onClick: function () {
+								// Never use workspace.openLinkText here. When the link
+								// target is not in the vault index yet (the conflict
+								// copy is only ~1s old), openLinkText falls through to
+								// fileManager.createNewFile and plants a 0-byte note --
+								// so clicking "show the saved copy" would create
+								// garbage instead of opening it. Resolve the file and
+								// open it, or say honestly that it is not indexed yet.
+								var file =
+									(window.app.vault &&
+										window.app.vault.getAbstractFileByPath &&
+										window.app.vault.getAbstractFileByPath(result.conflictSavedAs)) ||
+									(window.app.metadataCache &&
+										window.app.metadataCache.getFirstLinkpathDest &&
+										window.app.metadataCache.getFirstLinkpathDest(
+											result.conflictSavedAs,
+											""
+										));
+								if (!file) {
+									window.__MYOBS_NOTICES?.push?.({
+										level: "warn",
+										source: "fs",
+										message:
+											"找不到保留的舊版本：" +
+											result.conflictSavedAs +
+											"（可能尚未進入索引，或已被移動／刪除）",
+										dedupeKey: "fs:conflict-missing:" + path
+									});
+									return;
+								}
+								window.app.workspace.getLeaf(false).openFile(file, { active: true });
+							}
+						});
+					}
+				} catch (actionErr) {
+					conflictActions = [];
+				}
+				window.__MYOBS_NOTICES?.push?.({
+					level: "warn",
+					source: "fs",
+					message:
+						"偵測到同時寫入：" +
+						relative +
+						" 的舊版本已保留為 " +
+						result.conflictSavedAs +
+						"。目前畫面顯示的是你這次寫入的版本。",
+					detail:
+						"another writer changed the file between the read and this write; " +
+						"the previous bytes are in " +
+						result.conflictSavedAs,
+					dedupeKey: "fs:conflict:" + relative,
+					actions: conflictActions
+				});
+			} catch (err) {
+				console.warn("[my-obsidian] could not surface the conflict copy", err);
+			}
 		}
 		return undefined;
 	}

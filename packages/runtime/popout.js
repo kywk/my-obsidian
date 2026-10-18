@@ -97,6 +97,57 @@
 		"/shim/require-shim.js"
 	];
 
+	/*
+	 * Runtime modules the popout realm must evaluate for itself.
+	 *
+	 * This is an explicit set, not "every /runtime/*.js": each entry exists
+	 * because some code running in *this realm* looks the module up on its own
+	 * `window`. Loading more than that duplicates app-wide machinery and can
+	 * produce two writers where the design promises one.
+	 *
+	 *   notices.js  window.__MYOBS_NOTICES is a per-realm object. Other runtime
+	 *               modules treat it as optional, but keeping the contract
+	 *               present here means failures raised from popout code have
+	 *               the same reporting surface as the hosting page.
+	 *   menu.js     Electron resolves the menu host in the realm that sends the
+	 *               IPC. Without this file the popout's context-menu reply fell
+	 *               back to fixed editFlags and Menu.popup() had no renderer,
+	 *               so the popout depended on the host's DOM for its menus.
+	 *   print.js    Every print-to-pdf send that reaches this realm's
+	 *               ipcRenderer must be answered here. Without this file
+	 *               electron-shim's printHost() walked up to the hosting page
+	 *               and printed the host's active view; with it, the realm that
+	 *               owns the send also owns the print view (DESIGN.md §11.10).
+	 *               See installPdfSurfaceRouter() for why loading the file is
+	 *               not sufficient on its own.
+	 *
+	 * Deliberately excluded:
+	 *   watch-shim.js     no adapter/watcher in a popout (already excluded from
+	 *                     SHIM_FILES); a second /api/watch socket has no reader.
+	 *   plugin-watch.js   plugin hot reload is one app-wide cycle. A second
+	 *                     instance would subscribe to nothing here and, if it
+	 *                     ever did receive events, would race the host's
+	 *                     unload -> load sequence.
+	 *   platform-bridge.js  Platform is a shared object; re-running the width
+	 *                     breakpoint logic per popout would overwrite overrides
+	 *                     based on the popout's viewport.
+	 *   popout.js         popouts are a DOM surface of the host app, not a new
+	 *                     app; a nested interceptor would also claim the
+	 *                     "popup,hide=true" PDF surface before print.js can
+	 *                     replace it with an iframe.
+	 *   resilience.js     reachability probing and the offline write gate are
+	 *                     app-wide state that the hosting page already owns; a
+	 *                     second probe + notice stream per window would only
+	 *                     duplicate the same signal.
+	 */
+	var RUNTIME_FILES = [
+		"/runtime/notices.js",
+		"/runtime/menu.js",
+		"/runtime/print.js"
+	];
+
+	var INJECTED_FILES = SHIM_FILES.concat(RUNTIME_FILES);
+
 	/** @type {Array<{at: number, action: string, [key: string]: any}>} */
 	var events = [];
 	/** @type {string[] | null} shim sources, once loaded */
@@ -179,7 +230,7 @@
 
 	function fetchSources() {
 		return Promise.all(
-			SHIM_FILES.map(function (url) {
+			INJECTED_FILES.map(function (url) {
 				return fetch(url, { credentials: "same-origin" }).then(function (response) {
 					if (!response.ok) throw new Error(url + ": HTTP " + response.status);
 					return response.text();
@@ -198,11 +249,11 @@
 		if (sources) return sources;
 		var out = [];
 		var xhr = new XMLHttpRequest();
-		for (var i = 0; i < SHIM_FILES.length; i++) {
-			xhr.open("GET", SHIM_FILES[i], false);
+		for (var i = 0; i < INJECTED_FILES.length; i++) {
+			xhr.open("GET", INJECTED_FILES[i], false);
 			xhr.send(null);
 			if (xhr.status !== 200) {
-				throw new Error("cannot load " + SHIM_FILES[i] + " (HTTP " + xhr.status + ")");
+				throw new Error("cannot load " + INJECTED_FILES[i] + " (HTTP " + xhr.status + ")");
 			}
 			out.push(xhr.responseText);
 		}
@@ -245,13 +296,19 @@
 
 		var code = loadSourcesSync();
 		for (var i = 0; i < code.length; i++) {
-			// win.eval() runs the shim in the popout's realm, so every shim's
-			// `window` / `document` is the popout's own.
+			// win.eval() runs the script in the popout's realm, so every shim's
+			// `window` / `document` is the popout's own. Runtime modules follow
+			// the shims because they read window.__MYOBS_MODULES at load time.
 			win.eval(code[i]);
 		}
-		frame.shims = code.length;
+		frame.shims = SHIM_FILES.length;
+		frame.runtime = RUNTIME_FILES.length;
 		frame.instrumented = true;
-		record("instrumented", { shims: code.length });
+		record("instrumented", { shims: frame.shims, runtime: frame.runtime });
+		// Now that at least one popout document exists (and print.js has long
+		// since installed its own window.open surface), make the focused-window
+		// print routing the outermost interceptor.
+		installPdfSurfaceRouter();
 	}
 
 	/**
@@ -452,6 +509,97 @@
 
 		api.installed = true;
 		return true;
+	}
+
+	// ---------------------------------------------------------------------
+	// The focused window owns its print surface
+	//
+	// Obsidian's own Export to PDF calls the bare `window.open(...)` of the
+	// realm the bundle was evaluated in — this page — even when the command was
+	// run from a popout. print.js answers that by replacing the throwaway popup
+	// with a hidden iframe of *this* document, so h0() attaches this realm's
+	// electron and the print-to-pdf send lands in this realm's print.js; the
+	// printed view is then this document's active view. From a popout that is
+	// the wrong window twice: the host's active view gets moved (and an empty
+	// host leaf can be picked instead of the note the user is looking at).
+	//
+	// Loading print.js into the popout realm is necessary but not sufficient,
+	// because the surface is created here. The router below is the missing
+	// hop: while a popout document is the active document, a "popup,hide=true"
+	// request is handed to that popout's own window, where its print.js
+	// replaces it with an iframe inside the popout document. h0() then walks
+	// to the popout window, so the whole flow stays in the realm the user is
+	// looking at. Any other request (including every host-side export) falls
+	// through to the previous interceptor unchanged.
+	// ---------------------------------------------------------------------
+
+	var PDF_SURFACE_FEATURES = /(^|[,;])\s*hide\s*=\s*true\s*($|[,;])/i;
+	var pdfRouterInstalled = false;
+
+	/** @param {unknown} url @param {unknown} features */
+	function isPdfSurfaceRequest(url, features) {
+		if (url !== "about:blank") return false;
+		if (typeof features !== "string") return false;
+		return PDF_SURFACE_FEATURES.test(features);
+	}
+
+	/**
+	 * The popout window whose document Obsidian currently considers active.
+	 * The document identity (not focus bookkeeping of our own) is the signal,
+	 * so a host-side export while a popout merely exists is never rerouted.
+	 *
+	 * @returns {Window | null}
+	 */
+	function activePopoutWindow() {
+		var active = null;
+		try {
+			active = window.activeDocument || null;
+		} catch (err) {
+			active = null;
+		}
+		if (!active) return null;
+		for (var i = api.frames.length - 1; i >= 0; i -= 1) {
+			var win = api.frames[i].win;
+			if (!win || win.closed) continue;
+			try {
+				if (win.document === active) return win;
+			} catch (err) {
+				/* cross-realm document access is not expected; skip the frame */
+			}
+		}
+		return null;
+	}
+
+	function installPdfSurfaceRouter() {
+		if (pdfRouterInstalled) return;
+		// Only meaningful once print.js owns this document's open/popup path.
+		if (!window.__MYOBS_PRINT || window.__MYOBS_PRINT.installed !== true) return;
+		var previous = window.open;
+		if (typeof previous !== "function") return;
+
+		window.open = function (url, target, features) {
+			if (isPdfSurfaceRequest(url, features)) {
+				var focused = activePopoutWindow();
+				if (focused) {
+					try {
+						var win = focused.open(url, target, features);
+						if (win) {
+							record("pdf-surface-routed", {
+								file: (focused.__MYOBS_POPOUT_WINDOW || {}).file || null
+							});
+							return win;
+						}
+					} catch (err) {
+						// A failed reroute must not lose the export: fall through
+						// to this realm's own surface.
+						record("pdf-surface-route-failed", { error: describeError(err) });
+					}
+				}
+			}
+			return previous.apply(window, arguments);
+		};
+		pdfRouterInstalled = true;
+		record("pdf-surface-router", {});
 	}
 
 	// ---------------------------------------------------------------------

@@ -93,7 +93,14 @@ Server 在 HTML 中注入一段同步可用的 JSON，**必須早於任何 shim 
 - 僅允許 vault root 內的路徑，否則 403。
 - 支援 `Range`（回 206 + `Content-Range` + `Accept-Ranges`）、`Last-Modified`、
   `Cache-Control: no-cache`（mtime 已在 query string 上）。
-- `PUT` 供大檔上傳（無條件寫入）；可選帶 `X-Write-Token` 標頭，帶了就登記到與 `/api/fs`
+- `PUT` 供大檔上傳。**串流寫入**：route-level `onRequest` + `reply.hijack()`，把 `request.raw`
+  流進同目錄的 sibling temp 檔（`.name.<uuid>.myobs-upload`、`flags:"wx"`、0600），
+  成功後 `rename` 覆蓋目標（走 `resolved.real`，維持寫穿 symlink 的語意）。
+  中斷或失敗一律刪 temp，舊檔內容不變、不留半檔。任何 content-type 都接受
+  （不再受 Fastify 的 JSON parser 影響）；`bodyLimit` 在串流中以位元組計數強制，超過回 413 `ETOOBIG`。
+  `X-Write-Token` 在 rename 成功後才登記。實測 64 MiB 上傳峰值 +34 MiB `arrayBuffers`
+  （整包 buffered 會持有完整 64 MiB）。
+- `PUT` 可選帶 `X-Write-Token` 標頭，帶了就登記到與 `/api/fs`
   相同的 origin token 表，讓上傳者略過自己的回音事件。`GET`/`HEAD` 不登記（下載不是變更）。
 - URL 形式為 `/v/` + 絕對路徑去掉開頭 `/`，例如
   `/v/Users/kywk/kywk/obsidian/assets/a.png?1730000000000`。
@@ -225,6 +232,14 @@ Electron 的 main 不會回覆，因此 runtime **不得**用 `ipcRenderer.on()`
 - 一律 `Cache-Control: no-store`；成功與上游錯誤帶 `X-MyOBS-Proxy: 1`，
   proxy 自身錯誤另帶 `X-MyOBS-Proxy-Error: <code>`。
 - 錯誤碼：400 `EINVAL`、403 `EPERM`、502 `EBADGATEWAY`/`ETOOBIG`、504 `ETIMEDOUT`。
+- **DNS 檢查（每一跳、每個請求）**：`dns.lookup(host, {all:true})`，
+  **任何**一個答案是私有／保留位址就 403 `EPERM`；解析失敗或 0 筆答案 → 502；解析逾時 → 504。
+  覆蓋 IPv4（`0/8`、`10/8`、`100.64/10`、`127/8`、`169.254/16`、`172.16/12`、`192.0.0/24`、
+  `192.0.2/24`、`198.18/15`、`198.51.100/24`、`203.0.113/24`、`192.168/16`、`224/4`、`240/4`）
+  與 IPv6（`::`、`::1`、`fc00::/7`、`fe80::/10`、`ff00::/8`、`2001:db8::/32`、Teredo、6to4、
+  `100::/64`、**IPv4-mapped** 與 deprecated IPv4-compatible）。不快取解析結果。
+  **這是 TOCTOU-able 的緩解，不是完整防護** —— 檢查後 `fetch` 會再解析一次；
+  真正的修法是位址 pinning（自訂 dispatcher 連到已檢查的 IP），目前沒有這個 hook。
 
 ---
 
@@ -263,7 +278,44 @@ window.__MYOBS_PRINT            = { installed, printActiveNote(), beginPrintView
 window.__MYOBS_PLATFORM_BRIDGE  = { installed, captured, overrides, applied, breakpointPx: 768, events[] }
 window.__MYOBS_NET              = { enabled, hosts[], rewrite(url), stats { rewritten, skipped, lastUrl } }
 window.__MYOBS_WATCH            = { watch, subscribe, state { connected, reconnects, received, dispatched, filtered } }
+window.__MYOBS_NOTICES          = { installed, enabled, push, dismiss, list, clear, events[], consumeLastConflict }
+window.__MYOBS_RESILIENCE       = { installed, online, probes, networkFailures, lastProbe, reconciling,
+                                    lastReconcile { ok, durationMs, checked, created, changed, deletedFiles,
+                                                    deletedFolders, createdFolders, skipped, errors },
+                                    events[] { type }, noteNetworkFailure, noteWriteBlocked, probeNow, reconcileNow }
+window.__MYOBS_DIALOG           = { installed, calls[], lastResult, lastSaveSource, syntheticPath }
 ```
+
+### 10.1 `__MYOBS_NOTICES` 契約
+
+```js
+push({ level:"info"|"warn"|"error", source, message, detail?, dedupeKey?, actions? }) -> id | null
+```
+
+- `info` 8 秒、`warn` 20 秒、`error` **不自動消失**；展開 detail 時暫停計時。
+- 同 `dedupeKey` 重複 push **合併成一張卡並累加 count**，訊息取最新。
+- `enabled = false` 時 `push` 回 `null`、不進 DOM，但 `events` 仍記 `{ action:"push", suppressed:true }`。
+- `push` 全包 try/catch；**呼叫端一律寫 `window.__MYOBS_NOTICES?.push?.(…)`**。
+- 樣式只用 Obsidian 的 CSS 變數；z-index 低於 fatal 畫面。
+- 已使用的 key：
+  `resilience.js` → `server:offline` / `server:reconnected` / `server:reconciled` /
+  `server:reconciled-none` / `server:reconcile-failed` / `write-blocked:<path>`；
+  `fs-shim.js` → `fs:conflict:<path>` / `fs:conflict-missing:<path>`；
+  `plugin-watch.js` → `plugin:<id>` / `plugin-disabled:<id>` / `plugin-disable-failed:<id>` / `plugin-policy`；
+  `net-rewrite.js` → `proxy-host:<host>`。
+
+### 10.2 fs 錯誤碼（client 端）
+
+| code | 意義 | 可重試 |
+|---|---|---|
+| `EOFFLINE` | 已知離線，shim 直接擋下（未送出請求） | 否，等恢復 |
+| `ECONNREFUSED` | 請求未到達伺服器 | 讀取一次，寫入否 |
+| `EIO` | HTTP 層錯誤或非預期回應 | 否 |
+| `EPERM` / `ENOENT` / `EISDIR` / `EEXIST` / `ECONFLICT` | 伺服器回報的語意錯誤 | 否 |
+
+診斷欄位：`err.myobs = { op, path, write, network, blocked }`。
+寫入類的 `EOFFLINE` / `ECONNREFUSED` unhandled rejection 會被抑制（`fatal-suppressed`），
+讀取與啟動錯誤仍顯示 fatal 畫面。
 
 列印結果形狀：成功 `{ ok:true, reason:"browser-print-dialog", printed:true, fileWritten:false, path, kind, filepath }`；
 沒有開啟筆記 `{ ok:false, reason:"no-active-note", error:{ code:"NO_ACTIVE_NOTE" } }`。

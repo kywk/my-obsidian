@@ -126,6 +126,9 @@ npm run check:dialog          # remote.dialog、Export to PDF 全鏈路
 npm run check:popout          # 多視窗
 npm run check:attachment      # /v/*、Range、編碼檔名
 npm run check:plugin-install  # 真實網路：Browse → Install → Enable（需連外網）
+npm run check:notices         # 通知層：三等級、dedupe、conflict 單卡、外掛失敗
+npm run check:resilience      # 後端重啟：離線偵測、寫入明確失敗、重連 reconcile
+npm run check:parity          # popout realm 的 runtime、popout 匯出印自己的筆記
 ```
 
 **全部只對 vault 複本執行。** 真實驗收方式：

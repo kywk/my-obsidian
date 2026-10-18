@@ -58,6 +58,25 @@
 - [ ] **`release-assets.githubusercontent.com`** — GitHub release 已改 redirect 到此 host，
       proxy allowlist 未含（installer 例外允許）；Obsidian Browse 直接抓時會 403
 - [ ] **proxy DNS rebinding 防護** — 目前只驗 hostname，未在解析後檢查 IP
+- [x] **後端斷線與重啟韌性** — `resilience.js` + `fs-shim` 的 `EOFFLINE`/`ECONNREFUSED` +
+      重連後逐檔 reconcile（**不可用 `listAll()`**，會造成重複節點）。
+      `tools/resilience-check.mjs` 8/8（`DESIGN.md` §11.13）
+- [x] **修正：probe 單次逾時即判定離線** — 負載下會誤擋使用者存檔並謊報「沒有存到磁碟」。
+      改為連續 2 次失敗、逾時 5 秒；離線偵測 1.88 秒（門檻 5 秒）。見 §11.13.1
+- [x] **修正：fatal overlay 蓋掉 Obsidian 自己的存檔失敗訊息** — 症狀是「有訊息但被我們的錯誤畫面吃掉」
+- [x] **使用者可見的失敗** — `notices.js`；一次 conflict 一張卡、boot 期外掛失敗用狀態差集、
+      `tools/notices-check.mjs` 10/10（§11.14）
+- [x] **修正：`workspace.openLinkText()` 會種出 0 byte 筆記** — conflict 副本尚未進索引時按「顯示舊版本」
+      會 `createNewFile`。改用 `getAbstractFileByPath` + `leaf.openFile`
+- [x] **popout realm 的 runtime 腳本** — 載入 notices/menu/print，排除 plugin-watch/watch-shim/
+      platform-bridge/popout/resilience（各有理由）。`tools/parity-check.mjs` 8/8
+- [x] **修正：從 popout 匯出會印到 host 的筆記** — Obsidian 用「建立該 function 的 realm」的
+      `window.open`，PDF surface 落在 host；加 `installPdfSurfaceRouter()` 依 `window.activeDocument` 轉向
+- [x] **proxy DNS rebinding 防護** — 每跳 `dns.lookup`、私有位址 403、不快取（TOCTOU-able，已記錄）
+- [x] **PUT `/v/*` 串流化** — temp + rename 原子提升；64 MiB 上傳峰值 +34 MiB（原本整包 buffered）
+- [ ] **`listAll()` 的損壞風險** — 目前只在 `resilience.js` 註解與文件記錄；若未來有程式碼呼叫它會壞樹
+- [ ] **`templater` 類外掛的 boot 失敗偵測** — `onload` 在建構後拋錯者會留在 `plugins`，狀態差集看不到
+- [ ] **`releases.obsidian.md` fallback** — 未加入 allowlist（決策點）
 - [ ] **`GAPS.md` 內未實作項** — 逐條決策：補實作或標為永久限制
 
 ---

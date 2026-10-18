@@ -414,13 +414,26 @@ async function main() {
           }
         }
       } else if (msg.method === 'Network.loadingFailed') {
+        // Map requestId -> url: several requests are usually in flight, so
+        // "last URL seen" is the wrong attribution for a failure.
+        const failedUrl = report.network.byRequestId?.[msg.params.requestId] ?? '(unknown)';
+        // resilience.js probes the backend every 2s with HEAD /?myobs-probe=…
+        // and aborts its own request on timeout. That is a health check, not a
+        // vault request, so counting it as a failure here would report a
+        // regression that is really the app measuring itself under load.
+        if (/[?&]myobs-probe=/.test(failedUrl)) {
+          report.network.probeAborts = (report.network.probeAborts ?? 0) + 1;
+          return;
+        }
         report.network.failures.push({
-          url: report.network.lastRequestUrl ?? '(unknown)',
+          url: failedUrl,
           status: 0,
           error: msg.params.errorText,
           type: msg.params.type,
         });
       } else if (msg.method === 'Network.requestWillBeSent') {
+        report.network.byRequestId = report.network.byRequestId ?? {};
+        report.network.byRequestId[msg.params.requestId] = msg.params.request.url;
         report.network.lastRequestUrl = msg.params.request.url;
       }
     });
