@@ -169,7 +169,18 @@
 			return Promise.reject(new Error("fetch is not available in this browser"));
 		}
 
-		return fetchFn(request.url, options).then(function (response) {
+		// net-rewrite.js installs a rewrite for hosts that do not send CORS
+		// headers (github.com and friends), routing them through the server's
+		// /api/proxy. Looked up at call time so the seam can be filled by a
+		// script that loads after this one, and so disabling it is immediate.
+		var targetUrl = request.url;
+		var rewrite = window.__MYOBS_REQUEST_REWRITE;
+		if (typeof rewrite === "function") {
+			var rewritten = rewrite(request.url);
+			if (typeof rewritten === "string" && rewritten.length > 0) targetUrl = rewritten;
+		}
+
+		return fetchFn(targetUrl, options).then(function (response) {
 			return response.arrayBuffer().then(function (buffer) {
 				var responseHeaders = {};
 				response.headers.forEach(function (value, key) {
@@ -356,6 +367,24 @@
 		return undefined;
 	}
 
+	var warnedMenuHost = false;
+
+	function callMenuHost(method, args) {
+		var host = window.__MYOBS_MENU;
+		if (!host || typeof host[method] !== "function") {
+			if (!warnedMenuHost) {
+				warnedMenuHost = true;
+				console.warn("[my-obsidian] menu renderer is not installed; menu IPC is dropped");
+			}
+			return;
+		}
+		try {
+			host[method].apply(host, args || []);
+		} catch (err) {
+			console.error("[my-obsidian] menu renderer " + method + " threw", err);
+		}
+	}
+
 	function send(channel) {
 		var args = Array.prototype.slice.call(arguments, 1);
 
@@ -371,19 +400,56 @@
 				});
 				return;
 			case "context-menu":
+				// Request/reply channel: Obsidian asks the host for editFlags
+				// before it draws the editor context menu, and abandons the menu
+				// entirely when the reply is falsy (app.js @ 2593104). menu.js
+				// computes the flags from the live selection; the fallback keeps
+				// the channel usable in realms where menu.js is absent (popouts).
 				queueMicrotask(function () {
-					emit("context-menu", [null]);
+					var reply = null;
+					try {
+						var host = window.__MYOBS_MENU;
+						if (host && typeof host.buildContextReply === "function") {
+							reply = host.buildContextReply();
+						}
+					} catch (err) {
+						console.warn("[my-obsidian] context-menu flags failed", err);
+					}
+					emit("context-menu", [
+						reply || {
+							editFlags: {
+								canUndo: false,
+								canRedo: false,
+								canCut: false,
+								canCopy: true,
+								canPaste: true,
+								canDelete: false,
+								canSelectAll: true,
+								canEditRichly: false
+							},
+							misspelledWord: "",
+							dictionarySuggestions: [],
+							webContentsId: 1
+						}
+					]);
 				});
 				return;
 			case "set-menu":
+				// These three channels are renderer -> main in Electron; there is
+				// no echo back to the renderer, so listening for them with
+				// ipcRenderer.on() would never fire. The host renderer is called
+				// directly instead (the menu bar is ours to draw).
 				lastMenu = args[0] || null;
+				callMenuHost("setTemplate", [(args[0] && args[0].template) || []]);
 				return;
 			case "render-menu":
 				lastMenu = args[0] || null;
 				lastMenuItems = args[1] || null;
+				callMenuHost("renderMenuAtCursor", []);
 				return;
 			case "update-menu-items":
 				lastMenuItems = args[0] || null;
+				callMenuHost("updateMenuItems", [args[0] || []]);
 				return;
 			case "open-url":
 				openExternal(args[0]);
@@ -690,21 +756,69 @@
 		};
 	}
 
+	// Electron's Menu is the renderer's *native* menu path: on macOS the Menu
+	// class defaults to useNativeMenu = true and every context menu becomes
+	// Menu.buildFromTemplate(items).popup({x,y}) (app.js @ 1226079 picks the
+	// native branch, the popup call is at 1227604). The shim
+	// used to drop that call, which is why right-click menus did not exist.
+	// menu.js renders the same template as DOM and fires "menu-will-close"
+	// because the caller uses that event to reset its own menu state.
 	function makeMenu(template) {
-		var menu = {
+		var handlers = Object.create(null);
+		var menu;
+
+		function fire(name) {
+			var list = handlers[name] || [];
+			for (var i = 0; i < list.slice().length; i++) {
+				try {
+					list[i]();
+				} catch (err) {
+					console.error("[my-obsidian] Menu '" + name + "' handler threw", err);
+				}
+			}
+		}
+
+		menu = {
 			items: template || [],
-			popup: function () {},
-			closePopup: function () {},
+			popup: function (options) {
+				var host = window.__MYOBS_MENU;
+				if (!host || typeof host.popupTemplate !== "function") {
+					console.warn("[my-obsidian] Menu.popup() has no renderer (menu.js missing)");
+					return;
+				}
+				host.popupTemplate(template || [], options || {}, function () {
+					fire("menu-will-close");
+				});
+			},
+			closePopup: function () {
+				var host = window.__MYOBS_MENU;
+				if (host && typeof host.close === "function") host.close();
+			},
 			append: function () {},
 			insert: function () {},
 			destroy: function () {},
-			on: function () {
+			on: function (name, fn) {
+				if (typeof fn === "function") (handlers[name] || (handlers[name] = [])).push(fn);
 				return menu;
 			},
-			once: function () {
+			once: function (name, fn) {
+				if (typeof fn !== "function") return menu;
+				function wrapped() {
+					menu.removeListener(name, wrapped);
+					fn();
+				}
+				return menu.on(name, wrapped);
+			},
+			removeListener: function (name, fn) {
+				var list = handlers[name];
+				if (!list) return menu;
+				var index = list.indexOf(fn);
+				if (index !== -1) list.splice(index, 1);
 				return menu;
 			},
-			removeListener: function () {
+			removeAllListeners: function (name) {
+				if (name) delete handlers[name];
+				else handlers = Object.create(null);
 				return menu;
 			}
 		};
@@ -795,6 +909,14 @@
 			getSpellCheckerLanguages: function () {
 				return languages.slice();
 			},
+			// The editor menu's "Add to dictionary" calls these; a browser has
+			// no OS spelling dictionary, so accept and move on.
+			addWordToSpellCheckerDictionary: function () {
+				return true;
+			},
+			removeWordFromSpellCheckerDictionary: function () {
+				return true;
+			},
 			cookies: {
 				get: function () {
 					return Promise.resolve([]);
@@ -831,6 +953,60 @@
 
 	var webContentsStub = null;
 
+	function copySelection() {
+		try {
+			if (document.execCommand && document.execCommand("copy")) return;
+		} catch (err) {
+			/* execCommand refuses outside a user gesture */
+		}
+		var text = "";
+		try {
+			text = String(window.getSelection() || "");
+		} catch (err) {
+			text = "";
+		}
+		if (text && navigator.clipboard && navigator.clipboard.writeText) {
+			navigator.clipboard.writeText(text).catch(function () {});
+		}
+	}
+
+	// A browser cannot replay a native paste. Read the clipboard (same-origin
+	// localhost is a secure context) and deliver it as a paste event so
+	// CodeMirror's own paste handler inserts it; execCommand is the fallback.
+	function pasteIntoFocused() {
+		if (!navigator.clipboard || typeof navigator.clipboard.readText !== "function") return;
+		navigator.clipboard.readText().then(
+			function (text) {
+				if (!text) return;
+				var target = document.activeElement || document.body;
+				var delivered = false;
+				try {
+					var data = new DataTransfer();
+					data.setData("text/plain", text);
+					var event = new ClipboardEvent("paste", {
+						clipboardData: data,
+						bubbles: true,
+						cancelable: true
+					});
+					target.dispatchEvent(event);
+					delivered = event.defaultPrevented;
+				} catch (err) {
+					delivered = false;
+				}
+				if (!delivered) {
+					try {
+						document.execCommand("insertText", false, text);
+					} catch (err) {
+						/* nothing editable is focused */
+					}
+				}
+			},
+			function (err) {
+				console.warn("[my-obsidian] clipboard read failed", err);
+			}
+		);
+	}
+
 	function makeWebContents() {
 		if (webContentsStub) return webContentsStub;
 		var session = makeSession();
@@ -862,15 +1038,19 @@
 			capturePage: function () {
 				return Promise.resolve(makeNativeImage());
 			},
-			copy: function () {
-				document.execCommand && document.execCommand("copy");
-			},
+			// The editor context menu acts through these (app.js @ 2593192 runs
+			// the whole clipboard section on `webContents.fromId(...)`).
 			cut: function () {
-				document.execCommand && document.execCommand("cut");
+				try {
+					if (document.execCommand && document.execCommand("cut")) return;
+				} catch (err) {
+					/* fall through */
+				}
+				copySelection();
+				document.execCommand && document.execCommand("delete");
 			},
-			paste: function () {
-				document.execCommand && document.execCommand("paste");
-			},
+			copy: copySelection,
+			paste: pasteIntoFocused,
 			selectAll: function () {
 				document.execCommand && document.execCommand("selectAll");
 			},
@@ -880,7 +1060,30 @@
 			redo: function () {
 				document.execCommand && document.execCommand("redo");
 			},
-			insertText: function () {},
+			insertText: function (text) {
+				try {
+					document.execCommand("insertText", false, String(text == null ? "" : text));
+				} catch (err) {
+					/* no editable target */
+				}
+			},
+			replaceMisspelling: function (text) {
+				try {
+					document.execCommand("insertText", false, String(text == null ? "" : text));
+				} catch (err) {
+					/* no editable target */
+				}
+			},
+			// macOS "Look up <selection>"; there is no browser equivalent.
+			showDefinitionForSelection: function () {},
+			isDevToolsOpened: function () {
+				return false;
+			},
+			openDevTools: function () {},
+			closeDevTools: function () {},
+			focus: function () {
+				if (window.focus) window.focus();
+			},
 			executeJavaScript: function () {
 				return Promise.resolve(undefined);
 			},
@@ -1082,6 +1285,20 @@
 		dialog: dialogStub,
 		Menu: menuModule,
 		MenuItem: MenuItemStub,
+		// Context menus resolve the sender back to a WebContents to run
+		// cut/copy/paste and spelling actions (app.js @ 2593192). Every id maps
+		// to the one page this realm owns.
+		webContents: {
+			fromId: function () {
+				return makeWebContents();
+			},
+			getFocusedWebContents: function () {
+				return makeWebContents();
+			},
+			getAllWebContents: function () {
+				return [makeWebContents()];
+			}
+		},
 		screen: screenStub,
 		nativeImage: {
 			createFromPath: makeNativeImage,
@@ -1115,6 +1332,7 @@
 		},
 		remote: remote,
 		webFrame: webFrame,
+		webContents: remote.webContents,
 		app: appStub,
 		safeStorage: safeStorage,
 		nativeTheme: nativeTheme,

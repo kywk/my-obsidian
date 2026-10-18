@@ -42,8 +42,22 @@
 - [x] **修正：回音過濾的跨批次破口** — token 改為 TTL 內保留；已用真 Chrome 重現舊語意的重載迴圈
 - [x] **多視窗 popout** — 沿用 Obsidian 機制（同一 `app` 物件，非二次載入）；`tools/popout-check.mjs` 8/8。
       **機制與原假設不同，見 `DESIGN.md` §11.8**
-- [ ] **popout 還原的手勢 UX** — 開機被瀏覽器擋時的提示與「點擊還原」流程
-- [ ] **自繪選單列** — `Move to new window` 分頁右鍵在 macOS 走原生選單，這是前置依賴
+- [x] **自繪選單列** — `menu.js` + `electron-shim` 選單 IPC；`Menu.popup()` HTML fallback。
+      `Move to new window` 已可用（`DESIGN.md` §11.9、`tools/menu-check.mjs` 8/8）
+- [x] **右鍵情境選單** — `context-menu` 回非 null 的 `editFlags`（回 null 時 renderer 直接放棄，這是原本完全沒選單的真因）
+- [x] **列印／匯出 PDF** — `print.js`；必須搬進 `body > div.print`（`app.css` 的 `@media print` 會隱藏整個 app，
+      只加 leaf CSS 會印出空白頁）。`tools/print-check.mjs` 19/19
+- [x] **手機寬度降級** — `platform-bridge.js` 攔 webpack export getter 捕捉 `Platform`；
+      < 768px 只改 `isPhone`/`isTablet`，>= 768px 完全不動
+- [x] **PWA** — manifest + service worker（只快取靜態資產，vault 內容全排除）
+- [x] **Plugin 安裝與更新** — `GET /api/proxy`（SSRF allowlist）+ `POST /api/plugins/install`
+      （temp+rename、驗 digest、保留 data.json）+ `uninstall` → `.trash`
+- [ ] **Obsidian 內建「Export to PDF」** — 仍被 `remote.dialog.showSaveDialog` 的 `{canceled:true}` 擋住，
+      需另外包 dialog（`DESIGN.md` §11.10）
+- [ ] **popout 的列印與選單列** — popout realm 沒載入 `print.js` / `menu.js`
+- [ ] **`release-assets.githubusercontent.com`** — GitHub release 已改 redirect 到此 host，
+      proxy allowlist 未含（installer 例外允許）；Obsidian Browse 直接抓時會 403
+- [ ] **proxy DNS rebinding 防護** — 目前只驗 hostname，未在解析後檢查 IP
 - [ ] **`GAPS.md` 內未實作項** — 逐條決策：補實作或標為永久限制
 
 ---

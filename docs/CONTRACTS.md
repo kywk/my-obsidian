@@ -174,3 +174,97 @@ window.require = (name) => window.__MYOBS_MODULES[name]
 
 不可用模組（明確拋錯並附 `code: "MODULE_NOT_SUPPORTED"`）：
 `child_process`、`net`、`worker_threads`。
+
+也可用（`node-globals-shim.js`）：`util`、`buffer`、`querystring`，以及全域 `Buffer`、
+`global`、`setImmediate`。
+
+---
+
+## 7. 選單（renderer → runtime）
+
+`set-menu` / `update-menu-items` / `render-menu` 是 **renderer → main 的單向頻道**，
+Electron 的 main 不會回覆，因此 runtime **不得**用 `ipcRenderer.on()` 等待它們。
+`electron-shim.js` 的 `send()` 直接呼叫 `window.__MYOBS_MENU`：
+
+| channel | payload | runtime 動作 |
+|---|---|---|
+| `set-menu` | `{ template }` | 重畫選單列 |
+| `update-menu-items` | `[{ itemId, eState }]`、`force?` | 以 `id \|\| appCommand` 更新 checked/enabled/visible/label |
+| `render-menu` | — | 在最後游標位置彈出 root menu |
+
+`context-menu` 是**唯一有 reply** 的頻道：renderer 送空請求，宿主必須回**非 null** 物件，
+否則 renderer 直接放棄右鍵選單：
+
+```js
+{ editFlags: { canCut, canCopy, canPaste, canUndo, canRedo, canDelete,
+               canSelectAll, canEditRichly },
+  misspelledWord: "", dictionarySuggestions: [], webContentsId: 1 }
+```
+
+`remote.Menu.buildFromTemplate(t).popup(options)` 必須轉呼叫
+`window.__MYOBS_MENU.popupTemplate(t, options, onClose)`；關閉時觸發 `menu-will-close`。
+
+`nativeMenus`（1.14.4 在 `.obsidian/appearance.json`）設 `false` 時，右鍵選單由 Obsidian
+自己畫 HTML，上述 fallback 就不會被走到 —— 這是建議設定。
+
+---
+
+## 8. `GET /api/proxy?url=<absolute-url>`
+
+社羣外掛 Browse 的 CORS 缺口（`DESIGN.md` §11.12）。
+
+- **server 端 allowlist 是唯一強制點**：`github.com`、`api.github.com`、
+  `raw.githubusercontent.com`、`objects.githubusercontent.com`、
+  `github-releases.githubusercontent.com`、`codeload.github.com`、`obsidian.md`、
+  `forum.obsidian.md`、`help.obsidian.md`。
+- deny by default：非 https、非 80/443、URL 內嵌憑證、`localhost`、私有／保留 IP、
+  allowlist 外主機（含 lookalike 與 IDN）→ 403 `EPERM`。
+- redirect **逐跳**重新驗證，不用 `redirect: "follow"`。
+- 只轉發 `Accept`；不轉發 `Cookie` / `Authorization`；回應剝除 `Set-Cookie`。
+- 串流輸出，上限 32 MB（`ETOOBIG`）；header 與 chunk 各 10 秒 timeout（`ETIMEDOUT`）。
+- 一律 `Cache-Control: no-store`；成功與上游錯誤帶 `X-MyOBS-Proxy: 1`，
+  proxy 自身錯誤另帶 `X-MyOBS-Proxy-Error: <code>`。
+- 錯誤碼：400 `EINVAL`、403 `EPERM`、502 `EBADGATEWAY`/`ETOOBIG`、504 `ETIMEDOUT`。
+
+---
+
+## 9. `/api/plugins`
+
+| 端點 | 說明 |
+|---|---|
+| `GET /api/plugins` | `{ ok, plugins:[{id,name,version,minAppVersion,isDesktopOnly,enabled,dir}], errors:[{dir,message}] }` |
+| `POST /api/plugins/install` | body `{ repo:"owner/name", version?:"<tag>" }`；成功 `{ ok, id, version, files }` |
+| `POST /api/plugins/uninstall` | body `{ id }`；移到 `.trash/plugins/<id>[-N]`，**不覆蓋**既有項目 |
+
+install 流程：GitHub API 取 release → 下載 `manifest.json`/`main.js`（`styles.css` 若有）
+→ 驗 manifest 可解析、`main.js` 非空、`digest` 相符 → **temp + rename 原子替換**
+（先備份舊目錄，交換失敗就還原）→ 保留 `data.json`。
+`repo` 需符合 `^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`；解析後路徑不得逃出 plugins 目錄。
+**server 不自動啟用外掛、不改 `community-plugins.json`。**
+
+---
+
+## 10. PWA 與 runtime 診斷介面
+
+```
+GET /manifest.webmanifest  -> application/manifest+json; charset=utf-8, no-cache
+GET /sw.js                 -> text/javascript; charset=utf-8, no-cache, Service-Worker-Allowed: /
+  precache 僅 /obsidian/app.css、/obsidian/icon.png、/shim/*.js、/runtime/*.js
+  **絕不快取** /api/fs、/api/watch、/v/*、/obsidian/app.js
+GET /                      -> 在 </head> 前注入 <link rel="manifest">、theme-color、apple-touch-icon
+                              （packages/runtime/index.html 本身不改）
+```
+
+```js
+window.__MYOBS_MENU             = { installed, setTemplate, updateMenuItems, renderMenuAtCursor, popupTemplate, events[] }
+window.__MYOBS_POPOUT           = { installed, frames[], events[], blocked, request, openInNewWindow }
+window.__MYOBS_PLUGIN_WATCH     = { enabled, subscribed, events[], reloadAll() }
+window.__MYOBS_PRINT            = { installed, printActiveNote(), beginPrintView(), endPrintView(), lastResult, events[] }
+window.__MYOBS_PLATFORM_BRIDGE  = { installed, captured, overrides, applied, breakpointPx: 768, events[] }
+window.__MYOBS_NET              = { enabled, hosts[], rewrite(url), stats { rewritten, skipped, lastUrl } }
+window.__MYOBS_WATCH            = { watch, subscribe, state { connected, reconnects, received, dispatched, filtered } }
+```
+
+列印結果形狀：成功 `{ ok:true, reason:"browser-print-dialog", printed:true, fileWritten:false, path, kind, filepath }`；
+沒有開啟筆記 `{ ok:false, reason:"no-active-note", error:{ code:"NO_ACTIVE_NOTE" } }`。
+**瀏覽器永遠不會寫入 `filepath`。**

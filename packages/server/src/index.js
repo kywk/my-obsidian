@@ -14,6 +14,9 @@
  *                   this nor a stored config holds one, GET / serves the consent
  *                   page (GET /consent, POST /api/consent) and /obsidian/app.js
  *                   answers 403.
+ *   GITHUB_TOKEN    optional; authenticates plugin release lookups (raises the
+ *                   unauthenticated GitHub API limit of 60 requests/hour).
+ *   MYOBS_GITHUB_API optional; override the GitHub API base URL (local stubs).
  *
  * Consent precedence: options.termsText -> TERMS_ACK -> MYOBS_CONFIG file.
  * Recording consent through POST /api/consent takes effect without a restart.
@@ -32,6 +35,8 @@ import { handleFsRequest } from './fs-api.js';
 import { registerStaticRoutes } from './static.js';
 import { registerFileRoutes } from './files.js';
 import { createVaultWatcher } from './watch.js';
+import { registerProxyRoutes } from './proxy.js';
+import { registerPluginRoutes } from './plugins.js';
 import {
   createConsentState,
   defaultConfigPath,
@@ -230,6 +235,10 @@ export async function buildBootInfo(options) {
  * @param {object} [options.boot] Override the generated boot object.
  * @param {number} [options.bodyLimit] JSON body limit for /api/fs.
  * @param {number} [options.uploadBodyLimit] PUT /v/* body limit.
+ * @param {object} [options.proxy] GET /api/proxy options (fetchImpl, timeoutMs,
+ *   maxBytes; the allowHttp/allowedHosts overrides exist for tests only).
+ * @param {object} [options.plugins] Plugin routes options (githubApiBase,
+ *   githubToken, fetchImpl, allowInsecureDownload for the local test stub).
  * @returns {Promise<import('fastify').FastifyInstance>}
  */
 export async function buildApp(options = {}) {
@@ -387,6 +396,14 @@ export async function buildApp(options = {}) {
     }
     return reply.type('application/json; charset=utf-8').send(response);
   });
+
+  // Server-side fetch for hosts that do not send CORS headers (the community
+  // plugin browser). Registered after the auth hook so AUTH_TOKEN covers it.
+  registerProxyRoutes(app, options.proxy ?? {});
+
+  // Install/list/uninstall community plugins. Never enables one: enabling is
+  // written to community-plugins.json by the renderer, on the user's action.
+  registerPluginRoutes(app, { ...(options.plugins ?? {}), vault });
 
   registerConsentRoutes(app, {
     configPath,

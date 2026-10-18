@@ -268,8 +268,17 @@ async function main() {
     // (Obsidian wrote it on the host), so existence alone proves nothing --
     // what matters is that the server session never touches it and keeps its
     // own file instead (docs/DESIGN.md §4).
+    //
+    // Obsidian saves its layout after a debounce, measured at ~4.4s from boot on
+    // a fresh vault copy. Sampling at ~2s produced a flaky false negative that
+    // three separate workstreams hit independently, so wait for the file rather
+    // than assuming when it lands.
     const wsJson = path.join(args.vault, '.obsidian', 'workspace.json');
     const wsServer = path.join(args.vault, '.obsidian', 'workspace-server.json');
+    const wsDeadline = Date.now() + 15000;
+    while (Date.now() < wsDeadline && !fs.existsSync(wsServer)) {
+      await sleep(200);
+    }
     const wsAfter = fs.existsSync(wsJson) ? fs.statSync(wsJson).mtimeMs : null;
     report.facts.workspaceJsonMtime = { before: wsBefore, after: wsAfter };
     report.facts.workspaceServerCreated = fs.existsSync(wsServer);

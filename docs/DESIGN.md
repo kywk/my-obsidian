@@ -75,15 +75,15 @@ my-obsidian/
 | 2 | Renderer 來源與版本 | 本機 `/Applications/Obsidian.app/Contents/Resources/obsidian.asar`，版本跟隨安裝版（1.14.4）；`scripts/fetch-obsidian.mjs` 取得 |
 | 3 | `terms` 閘 | **首啟同意畫面**：使用者本人按下同意 → 存 server config → 注入 `sendSync("terms")`。**程式碼不內建該字串**。未同意則拒絕啟動並顯示明確錯誤（不可停在白色載入動畫） |
 | 4 | MVP 驗收邊界 | 編輯／預覽、檔案樹、分頁與分割、搜尋、標籤／反向連結、圖譜、Canvas、命令面板、核心 plugin 全數、社群 plugin 可安裝啟用、主題／片段 |
-| 5 | 桌面專屬功能 | **MVP 要**：多視窗 popout（**已實作**，見 §11.8）、自繪選單列、右鍵選單、列印 PDF、手機寬度降級。**降級**：外部 App 開啟（檔案→下載）、`obsidian://`→ web URL。**不做**：全域快捷鍵、系統匣、CLI、Sync/Publish |
+| 5 | 桌面專屬功能 | **MVP 要，已實作**：多視窗 popout（§11.8）、自繪選單列＋右鍵選單（§11.9）、列印 PDF（§11.10）、手機寬度降級（§11.11）。**降級**：外部 App 開啟（檔案→下載）、`obsidian://`→ web URL。**不做**：全域快捷鍵、系統匣、CLI、Sync/Publish |
 | 6 | Plugin 支援深度 | **L2**：瀏覽器端 Node polyfill + `fs`→RPC。L3（server 端執行）僅保留架構空間，不實作 |
 | 7 | 部署與存取控制 | 預設 bind `127.0.0.1`；`--host 0.0.0.0 --auth-token` 才對外；TLS 交給 reverse proxy。單一 vault，路由 `/v/<vaultId>/` 預留多 vault |
 | 8 | 資料一致性 | **server 為單一寫入者**為原則；外部寫入者存在時採條件寫入 + conflict copy（見 §6） |
 | 9 | 專案落點 | `~/kywk/project/obsidian/my-obsidian`，獨立 git repo |
 | 10 | 與 Markport 的關係 | **不 fork、不引入程式碼**（GPL-3.0 會綁住產品方向）。僅閱讀其 `archive/desktop-runtime` tag 作為參考，結論寫進本文件並標註出處 |
-| 11 | Plugin 安裝流程 | Server 端代理抓取 GitHub release 資產 → 寫入 `.obsidian/plugins/<id>/`；安裝／啟用時顯示第三方程式碼執行確認 |
+| 11 | Plugin 安裝流程 | **已實作**：`GET /api/proxy`（server 端 allowlist + SSRF 防護）、`POST /api/plugins/install`（temp+rename 原子替換、驗 digest、保留 `data.json`）、`POST /api/plugins/uninstall`（移到 `.trash`，不覆蓋）。詳見 §11.12 |
 | 12 | 同步拓撲 | MVP 預設與 vault 同機（Maestral 已在跑）；server 不主動執行任何 git 指令 |
-| 13 | 目標 UI 形態 | 桌機版面為預設；< 768px 自動降級手機版面；PWA manifest 有，service worker 只快取靜態資產 |
+| 13 | 目標 UI 形態 | 桌機版面為預設；< 768px 自動降級手機版面（§11.11）；PWA manifest 有，service worker **只快取靜態資產，絕不快取 vault 內容**（`/api/fs`、`/api/watch`、`/v/*`、`/obsidian/app.js` 全排除） |
 | 14 | 外部變更監控 | **服務啟動即監控（來源不限）**：Maestral/Dropbox、Desktop Obsidian、git、手動編輯 |
 | 15 | `/api/fs` 契約 | 單一 `POST /api/fs`（`{op, path, args}`）+ `ifMtimeMs` 條件寫入；大檔走 `GET/PUT /v/<id>/<path>` |
 | 16 | WS 推播 | `awaitWriteFinish` + 150ms 批次聚合 + write-token 回音過濾 + `WATCH_DISABLED` 開關 |
@@ -194,15 +194,27 @@ server config，再由此注入（契約欄位為 `termsText`，見 `CONTRACTS.m
 
 ---
 
-## 9. 五層驗收與測試
+## 9. 驗收層次與測試
 
-1. **Smoke（Playwright）**：等到 `window.app` → 開既有筆記 → 打字 → 存檔 → 比對磁碟內容。
-2. **Plugin 矩陣**：對 20 個已安裝 plugin 斷言「載入成功／拋錯」，把 L1/L2 覆蓋率變成數字。
-3. **Vault 真實資料回歸**：對 `~/kywk/obsidian` 的**複本**執行（不動真實 vault）。
-4. **熱重載**：外部改檔 → 斷言瀏覽器端內容／plugin 狀態更新。
-5. **並行寫入**：模擬 Desktop Obsidian 同時寫入 → 斷言產生 conflict copy 且無資料遺失。
+四支零依賴的 CDP harness（驅動本機 Chrome，不需要 Playwright）＋一套 `node:test`：
 
-效能門檻（實測）：5,124 篇 / 1.6 GB vault，冷啟 < 5 秒（server 與瀏覽器同機）。
+| 層 | 指令 | 項目數 | 涵蓋 |
+|---|---|---|---|
+| 單元 | `cd packages/server && npm test` | 217 | fs API、conflict、auth、consent、files/`/v/*`、watch token、proxy、plugins、static |
+| 1 | `node tools/spike-check.mjs --vault <複本>` | 8 | boot、>5000 檔、metadata cache、文字往返、二進位往返、冷啟、workspace 隔離、零例外 |
+| 2 | `node tools/hotreload-check.mjs` | 4 | WS 連線、筆記外部變更、plugin 熱重載、回音過濾 |
+| 3 | `node tools/attachment-check.mjs` | 全部 | `/v/*` URL 形狀、位元組一致、瀏覽器實際解碼、Range、pdfjs、編碼檔名 |
+| 4 | `node tools/popout-check.mjs` | 8 | popout 開啟、同一 app 物件、指定筆記、獨立寫入、真實鍵盤輸入、deep link |
+| 5 | `node tools/menu-check.mjs` | 8 | 選單列、render-menu、子選單、狀態同步、appCommand 執行、右鍵選單、Move to new window |
+| 6 | `node tools/print-check.mjs` | 19 | 只印筆記、PDF bytes、狀態還原、manifest、service worker、寬度切換 |
+
+**全部只對 `~/kywk/obsidian` 的複本執行**，真實 vault 從未被寫入。
+
+效能門檻（實測）：10,150 檔 / 341 MB，冷啟 **≈ 510 ms**；全 vault 掃描 + metadata cache ≈ 1 秒。
+
+> 教訓（已修）：`spike-check` 的 workspace 檢查原本在 boot 後 ~2 秒取樣，而 Obsidian 的
+> layout 存檔 debounce 到 ~4.4 秒才落盤，造成三個工作流各自踩到偶發的 7/8。現在改成
+> 等待檔案出現（上限 15 秒）再判定。
 
 ---
 
@@ -352,7 +364,91 @@ c.app = t.app;                    // ← 同一個 app 物件，同一個 render
 `window.open(…, "popup,background=#202020")` 在 Chromium 回 `null`（即使允許彈窗），
 必須由宿主扮演 Obsidian `main.js` 的 roles 解析，翻譯成 `popup,width,height[,left,top]`。
 
-實測能力邊界：popout 可用時間 3–42 ms、顯示指定筆記 31–153 ms；樣式同步（同一份 `app.css`）；
-parity 缺口是「開機自動還原 popout」需要手勢（瀏覽器擋），以及分頁右鍵的
-`Move to new window` 走原生選單（依賴尚未實作的「自繪選單列」）。
+實測能力邊界：popout 可用時間 3–42 ms、顯示指定筆記 31–153 ms；樣式同步（同一份 `app.css`）。
+parity 缺口只剩「開機自動還原 popout」需要手勢（瀏覽器擋）。分頁右鍵的
+`Move to new window` 已可用：`nativeMenus: false` 時由 Obsidian 自己畫 HTML 選單；
+未設定時（macOS 預設 true）由 runtime 的 `Menu.popup()` fallback 接手（§11.9）。
+
+### 11.9 選單：三件不同的事，不要混在一起
+
+1. **應用選單列**（File / Edit / View…）由 renderer 的 `AppMenuBarManager` 建 template，
+   用 `ipcRenderer.send("set-menu", { template })` 送到 main。瀏覽器沒有原生 menubar，
+   所以由 `packages/runtime/menu.js` 自繪。template 的 `before` 是給 desktop main process
+   合併預設選單用的標記，自繪時忽略；`&` 是 mnemonic，`&&` 是字面 `&`。
+2. **右鍵選單**由 renderer 自己建，顯示層有兩條路：`Menu.useNativeMenu === false` 時
+   renderer 直接畫 HTML；`true` 時呼叫 `remote.Menu.buildFromTemplate(t).popup()`，
+   由 runtime 畫成 HTML。`useNativeMenu` 來自 `getConfig("nativeMenus")`，macOS 且值為
+   `null` 時視為 `true`。
+   **1.14.4 的 `nativeMenus` 存在 `.obsidian/appearance.json`**（寫在 `app.json` 會被遷移），
+   設 `false` 可讓所有 context menu 回到 Obsidian 自己的 HTML 版本，是建議設定。
+3. **`context-menu` 是 request/reply，不是選單本身。** 編輯區右鍵時 renderer 先送空請求，
+   等宿主回 `{ editFlags, misspelledWord, dictionarySuggestions, webContentsId }`。
+   **回 `null` 時 renderer 直接放棄整個選單** —— 這才是「右鍵完全沒選單」的真正原因，
+   與 `nativeMenus` 無關。
+
+**實作邊界**
+
+- `set-menu` / `update-menu-items` / `render-menu` 在 Electron 是 renderer → main 的單向頻道，
+  **沒有回覆**；runtime 不能用 `ipcRenderer.on()` 等它們，必須由 shim 直接呼叫。
+- `appCommand` 項目在 desktop main.js 會被改寫成 `id = appCommand` + `click()` 內執行
+  `app.commands.executeCommandById(...)`；瀏覽器直接呼叫後者。
+- accelerator 只顯示、不綁定（Obsidian 的 keymap 仍是唯一來源）。
+- 選單列缺少 main-process 預設項目（About / Quit / undo / redo / cut / copy / paste / select all），
+  因為它們不在 renderer 送出的 template 裡。右鍵選單的剪貼簿項目不受影響。
+
+### 11.10 列印：`app.css` 的 `@media print` 會把整個 app 隱藏
+
+`vendor/obsidian/app.css` 內建：
+
+```css
+@media print {
+  .app-container { display: none !important; }
+  body > :not(.print) { display: none !important; }
+}
+```
+
+所以「只加一段顯示 active leaf 的 print CSS」會印出**空白頁**。
+實測：leaf-only CSS 產生的 PDF 只有 **1,087 bytes**；把 active view 搬進 body 層級的
+`div.print`（Obsidian 自己的 Export-to-PDF 也是這個結構）後，同一份筆記是
+**54,411 bytes / 1 page**。
+
+因此 `print.js` 的 `beginPrintView()` 會移動 view、`endPrintView()` 搬回原位，
+並處理瀏覽器的 `beforeprint` / `afterprint`。
+
+**兩個已知限制**：Obsidian 內建的「Export to PDF」命令仍走 `remote.dialog.showSaveDialog`，
+shim 回 `{canceled:true}`，所以那條路徑到不了列印；popout 視窗沒有載入 `print.js`。
+
+### 11.11 `Platform` 不在 `window` 上
+
+`typeof Platform` 在原始 bundle 是 `undefined`；`app.js` 沒有 `window.Platform = …`。
+唯一入口是 webpack 的 export getter `Platform: () => Qy`，而且 getter 定義時 `Qy` 尚未賦值
+（實測在 `Object.defineProperty` 當下呼叫 getter 得到 `undefined`）。
+
+`platform-bridge.js` 因此用三層：`Object.defineProperty(window, "Platform", …)` 攔截、
+包住 `Object.defineProperty` 觀察 export getter、`queueMicrotask` 後重讀。
+
+**只改 `isPhone` / `isTablet`**，不改 `canDisplayRibbon` / `canSplit` / `canStackTabs` ——
+那三個在 bundle 裡是 `!isPhone` 的 getter，直接改寫等於複製一份 bundle 邏輯，版本一改就漂移。
+
+還原時用「套用前快照」而不是重新用 media query 計算：實測 1280×900 時
+`Platform.isTablet` 是 `false`，而 Obsidian 自己的 600×600 query 是 `matches: true`，
+重算會多套一個原本不存在的 `is-tablet`。
+
+### 11.12 社群外掛的 Browse 是 CORS 問題，不是功能缺失
+
+Obsidian 用 `requestUrl` 抓 `raw.githubusercontent.com` / `github.com`，這些主機不送 CORS 標頭，
+瀏覽器直接 fetch 會失敗。修法分兩層：
+
+- **client**（`shim/net-rewrite.js`）：只把 allowlist 內的主機改寫成 `/api/proxy?url=…`。
+  這份清單只是提示。
+- **server**（`src/proxy.js`）：**唯一強制點**。deny by default；只允許 https、80/443、
+  非私有 IP、非 URL 內嵌憑證；redirect 逐跳重新驗證；不轉發 Cookie / Authorization，
+  回應剝除 `Set-Cookie`；32 MB 上限、10 秒 timeout。
+
+外掛安裝另外走 `src/plugins.js`：向 GitHub API 取 release → 下載 → 驗 manifest / `main.js` /
+digest → **temp + rename 原子替換**（先備份舊目錄，第 2 步失敗就還原）→ 保留 `data.json`。
+卸載是移動到 `.trash/plugins/<id>[-N]`，**絕不覆蓋**既有項目。server 不自動啟用外掛
+（那是使用者的選擇）。
+
+實測：`community-plugins.json` 2,767,062 bytes / 9,092 筆；安裝 `dataview` 成功且 digest 相符。
 
