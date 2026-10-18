@@ -1,0 +1,21 @@
+{
+  "name": "myobs-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "File API and static asset server for the my-obsidian renderer",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/websocket": "^11.3.4",
+    "chokidar": "^3.6.0",
+    "fastify": "^5.12.7"
+  }
+}

@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<!-- MYOBS_BOOT -->
+	<meta charset="utf-8"/>
+	<!-- MYOBS_BOOT above is replaced by the server with <script>window.__MYOBS = {...}</script>
+	     (CONTRACTS.md §1). It must stay ahead of every shim and every Obsidian script. -->
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+	<meta http-equiv="Content-Security-Policy" content="style-src 'unsafe-inline' 'self' https://fonts.googleapis.com">
+	<title>Obsidian</title>
+	<link href="/obsidian/app.css" type="text/css" rel="stylesheet"/>
+</head>
+<body class="theme-dark">
+<!--
+	Never add <base href="/"> here. Obsidian creates its metadata cache worker with
+	new Worker("worker.js"), and a <base> element changes what that relative URL
+	means (it would resolve to /worker.js, not /obsidian/worker.js). All assets are
+	loaded with absolute paths instead, and boot-data.js rewrites the handful of
+	worker names the shipped bundle hard-codes ("worker.js", "/worker.js", "sim.js",
+	"/sim.js") onto /obsidian/.
+-->
+<div id="myobs-fatal" hidden style="display:none;position:fixed;inset:0;z-index:2147483647;background:#101012;color:#e8e8ea;overflow:auto;align-items:center;justify-content:center;padding:32px;">
+	<div style="width:100%;max-width:960px;border:1px solid #333;border-radius:12px;background:#18181b;box-shadow:0 24px 64px rgba(0,0,0,.55);padding:26px 30px;">
+		<div style="font:600 11px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.14em;text-transform:uppercase;color:#e06c75;margin-bottom:10px;">my-obsidian</div>
+		<h1 id="myobs-fatal-title" style="font:600 22px/1.3 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;margin:0 0 8px;">Obsidian 啟動失敗</h1>
+		<p id="myobs-fatal-message" style="font:14px/1.6 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#d4d4d8;margin:0 0 16px;"></p>
+		<pre id="myobs-fatal-detail" style="font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#b6b6bd;background:#0c0c0e;border:1px solid #2c2c31;border-radius:8px;padding:14px;margin:0 0 20px;max-height:46vh;overflow:auto;white-space:pre-wrap;word-break:break-word;"></pre>
+		<div style="display:flex;flex-wrap:wrap;gap:10px;">
+			<button id="myobs-fatal-reload" type="button" style="font:500 13px/1 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#101012;background:#e8e8ea;border:0;border-radius:6px;padding:10px 16px;cursor:pointer;">重新載入</button>
+			<button id="myobs-fatal-dismiss" type="button" style="font:500 13px/1 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#d4d4d8;background:transparent;border:1px solid #444;border-radius:6px;padding:10px 16px;cursor:pointer;">關閉（僅供檢視）</button>
+		</div>
+		<p style="font:12px/1.6 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#77777f;margin:18px 0 0;">若訊息指出 terms 字串不符，請確認 server 已注入 __MYOBS.termsText；未同意授權時 server 不應提供 app.js（DESIGN.md §8）。</p>
+	</div>
+</div>
+<script>
+/*
+ * Early error surface. Obsidian's terms gate fails by calling window.close(),
+ * which cannot close a normal tab; without this hook the user would only see a
+ * blank loading screen (DESIGN.md §8 requires an explicit error instead).
+ */
+(function () {
+	"use strict";
+
+	function el(id) {
+		return document.getElementById(id);
+	}
+
+	function fatal(title, detail) {
+		var root = el("myobs-fatal");
+		if (!root) {
+			console.error("[my-obsidian] " + title + "\n" + detail);
+			return;
+		}
+		var titleEl = el("myobs-fatal-title");
+		var messageEl = el("myobs-fatal-message");
+		var detailEl = el("myobs-fatal-detail");
+		var text = detail == null ? "" : String(detail);
+		if (titleEl) titleEl.textContent = title || "Obsidian 啟動失敗";
+		if (messageEl) messageEl.textContent = text.split("\n")[0] || "未知錯誤";
+		if (detailEl) detailEl.textContent = text;
+		root.hidden = false;
+		root.style.display = "flex";
+	}
+
+	window.__myobsFatal = fatal;
+
+	function describe(reason) {
+		if (!reason) return "未知錯誤";
+		if (reason instanceof Error) {
+			return reason.stack || (reason.name + ": " + reason.message);
+		}
+		if (typeof reason === "object") {
+			try {
+				return JSON.stringify(reason);
+			} catch (err) {
+				return String(reason);
+			}
+		}
+		return String(reason);
+	}
+
+	window.addEventListener(
+		"error",
+		function (event) {
+			var target = event.target;
+			if (target && target !== window && (target.src || target.href)) {
+				fatal("資源載入失敗", (target.tagName || "resource") + " " + (target.src || target.href));
+				return;
+			}
+			var location = "";
+			if (event.filename) {
+				location = "\n" + event.filename + ":" + (event.lineno || 0) + ":" + (event.colno || 0);
+			}
+			fatal("執行錯誤", (event.message || "Unknown error") + location + (event.error ? "\n\n" + describe(event.error) : ""));
+		},
+		true
+	);
+
+	window.addEventListener("unhandledrejection", function (event) {
+		fatal("未處理的 Promise 錯誤", describe(event.reason));
+	});
+
+	var nativeClose = typeof window.close === "function" ? window.close.bind(window) : null;
+	window.close = function () {
+		if (!window.app) {
+			fatal(
+				"Obsidian 啟動中止",
+				"Obsidian 在建立 window.app 之前呼叫了 window.close()。\n" +
+				"最常見的原因是 terms 字串不符（DESIGN.md §8），或是 vault 路徑不存在／不可讀。\n" +
+				"請檢查 server 注入的 __MYOBS.termsText 與 vaultPath。"
+			);
+			return;
+		}
+		if (nativeClose) nativeClose();
+	};
+
+	document.addEventListener("click", function (event) {
+		var target = event.target;
+		if (!target || !target.id) return;
+		if (target.id === "myobs-fatal-reload") {
+			window.location.reload();
+		} else if (target.id === "myobs-fatal-dismiss") {
+			var root = el("myobs-fatal");
+			if (root) {
+				root.hidden = true;
+				root.style.display = "none";
+			}
+		}
+	});
+})();
+</script>
+
+<!-- shims: classic scripts, in dependency order; must all run before app.js -->
+<script src="/shim/boot-data.js"></script>
+<script src="/shim/process-shim.js"></script>
+<script src="/shim/electron-shim.js"></script>
+<script src="/shim/fs-shim.js"></script>
+<script src="/shim/path-shim.js"></script>
+<script src="/shim/os-shim.js"></script>
+<script src="/shim/url-shim.js"></script>
+<script src="/shim/crypto-shim.js"></script>
+<script src="/shim/btime-shim.js"></script>
+<script src="/shim/require-shim.js"></script>
+
+<script type="text/javascript" defer src="/obsidian/lib/codemirror/codemirror.js"></script>
+<script type="text/javascript" defer src="/obsidian/lib/codemirror/overlay.js"></script>
+<script type="text/javascript" defer src="/obsidian/lib/codemirror/markdown.js"></script>
+<script type="text/javascript" defer src="/obsidian/lib/codemirror/cm-addons.js"></script>
+<script type="text/javascript" defer src="/obsidian/lib/codemirror/vim.js"></script>
+<script type="text/javascript" defer src="/obsidian/lib/codemirror/meta.min.js"></script>
+<script type="text/javascript" defer src="/obsidian/lib/moment.min.js"></script>
+<script type="text/javascript" defer src="/obsidian/lib/pixi.min.js"></script>
+<script type="text/javascript" defer src="/obsidian/lib/i18next.min.js"></script>
+<script type="text/javascript" defer src="/obsidian/lib/scrypt.js"></script>
+<script type="text/javascript" defer src="/obsidian/lib/turndown.js"></script>
+<script type="text/javascript" defer src="/obsidian/enhance.js"></script>
+<script type="text/javascript" defer src="/obsidian/i18n.js"></script>
+<script type="text/javascript" defer src="/obsidian/app.js"></script>
+</body>
+</html>
