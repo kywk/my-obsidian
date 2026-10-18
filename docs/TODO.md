@@ -32,10 +32,18 @@
 - [x] **修正：`util`/`buffer`/`querystring` 未提供** — 見 `DESIGN.md` §11.4
 - [x] **L2 覆蓋率基準** — 16 個已啟用 plugin 載入 14 個；`vault-feed-reader`、`geo-story-map`
       因 `node:child_process` 未載入（設計上的邊界，見 `DESIGN.md` §11.6）
-- [ ] **`terms` 同意畫面** — server config 持久化 + UI（目前只有 `TERMS_ACK` 環境變數）
-- [ ] **未走到的路徑待補測** — `resourcePathPrefix` 產生的 `/v/*` 在兩輪 spike 中都是 0 次請求
-      （沒有渲染任何含圖片的筆記）。圖片／影片／PDF 的 Range 與 URL 對應仍未實測。
-- [ ] **回音過濾的跨批次破口** — 伺服器只為同一路徑的第一個事件保留 token（見 `CONTRACTS.md` §4）
+- [x] **`terms` 同意畫面** — `GET /consent` + `POST /api/consent` + 原子寫入 config + **免重啟生效**
+      驗收：未設定 → `/` 顯示同意頁且 `/obsidian/app.js` 403；POST 後（不重啟）→ 200 且可 boot
+- [x] **附件路徑 `/v/*` 實測** — 59 個單元測試 + `tools/attachment-check.mjs`
+- [x] **修正：`file-url` 回傳 `resourcesPath`** — 所有附件 URL 變成 `/obsidianprivate/var/…` → 404，
+      `/v/*` 永遠 0 次請求。見 `DESIGN.md` §11.7
+- [x] **修正：`/v/*` 路徑被解碼兩次** — 檔名含 `%XX` 時**靜默回傳錯誤檔案的位元組**（HTTP 200）
+- [x] **修正：`/v/*` Range 語意** — 改成三態（忽略 / 416 / 206），並補 `.md` 的 Content-Type
+- [x] **修正：回音過濾的跨批次破口** — token 改為 TTL 內保留；已用真 Chrome 重現舊語意的重載迴圈
+- [x] **多視窗 popout** — 沿用 Obsidian 機制（同一 `app` 物件，非二次載入）；`tools/popout-check.mjs` 8/8。
+      **機制與原假設不同，見 `DESIGN.md` §11.8**
+- [ ] **popout 還原的手勢 UX** — 開機被瀏覽器擋時的提示與「點擊還原」流程
+- [ ] **自繪選單列** — `Move to new window` 分頁右鍵在 macOS 走原生選單，這是前置依賴
 - [ ] **`GAPS.md` 內未實作項** — 逐條決策：補實作或標為永久限制
 
 ---

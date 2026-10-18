@@ -83,7 +83,7 @@
 | `fs-shim.js`（`api()` 的 `TOKEN_OPS`） | 所有變更類 op（`write`/`writeBinary`/`append`/`appendBinary`/`mkdir`/`rmdir`/`remove`/`rename`/`copy`/`utimes`）在傳輸層自動補 `token: __MYOBS.sessionToken`，呼叫端不需知道。讀取類 op 不補。 | 契約 §2 的 `token` 本來就是給回音過濾用的；這一層是唯一能涵蓋所有呼叫端（adapter、外掛、`writeFileSync` 佇列）的位置。 |
 | `boot-data.js`（`sessionToken`） | 每個 document 一組 token（`crypto.randomUUID()`，退回 `getRandomValues` 十六進位，最後才用 `Math.random`）；**不覆蓋** server 已注入的值。 | 多分頁各自一組是正確的：**同一分頁**的寫入才會被自己過濾掉。分頁 A 的寫入在分頁 B 仍會派發（B 需要 reconcile）。 |
 | `watch-shim.js`（事件過濾） | 以**事件**為單位略過 `originToken === sessionToken` 者，並略過同批同路徑的兄弟事件。 | 一開始是「整批略過」，但 server 會把**所有寫入者**聚合成同一個 150ms 批次，整批略過連同批的外部編輯一起吃掉（`tools/hotreload-check.mjs` 的筆記測試就是這樣失敗的）。逐事件過濾同樣能阻斷迴圈，且不會犧牲外部變更。 |
-| `watch-shim.js`（token 只覆蓋第一個事件） | server 的 `consumeOriginToken()` 對同一路徑只發一次 token；若同一路徑在**不同批次**又產生事件（例如新檔的 add 與後續 change），第二個事件沒有 token → 會被派發。 | 需要 server 端把 token 保留到路徑穩定（或改成 TTL 內都帶 token）。目前的破口只在「同一路徑跨批次」才會出現。 |
+| `watch-shim.js`（token 覆蓋範圍） | **已修**：server 端改為 TTL（30 s）內對該路徑的每個事件都帶 token（`watch.js` 的 `createOriginTokenStore`），跨批次破口關閉。 | 殘留限制兩條：(1) 同一路徑被兩個分頁互相 ping-pong 時彼此都像外部寫入者，單 token 契約無法區分；(2) TTL 窗口內同路徑的**外部**編輯會被視為自己的而延後一次 reconcile。 |
 | `watch-shim.js`（事件粒度與順序） | 只保證第 N 批在 O(150ms)；同一路徑在同一批只會有一個事件（server 的 `pending` Map 去重，`delete` 優先），同一批內的多個路徑**沒有先後語意**。 | Node 的 `fs.watch` 依序回報每一次變更。依賴「先 create 再 change」的外掛會看到合併後的事件。 |
 | `watch-shim.js`（`error` 事件） | 永不派發 `error`。Node 的 FSWatcher 失效時會丟 `error`，adapter 收到後會 `onFileChange(realpath)` 全庫 rescan。這裡若在每次 WS 斷線都派發，會變成反覆全庫掃描。 | 需要「重連後補償」的策略（見下一列）。 |
 | `watch-shim.js`（重連） | 指數退避 1s → 上限 15s；`state.reconnects` 只在第二次以後的連線累加。**不重播**錯過的批次。斷線期間的外部變更若之後沒有再次變動，永遠不會傳到瀏覽器。 | 應在重連後對 `.obsidian/plugins/*` 與開檔中的檔案補一次 mtime 掃描，或由 server 保存最近 N 秒的事件重播。 |
@@ -132,7 +132,7 @@
 
 | 位置 | 目前行為 | 正確行為 |
 |---|---|---|
-| `index.html` | Shim 以 `/shim/*` 載入、Obsidian 資產以 `/obsidian/*` 載入、runtime 層（`plugin-watch.js`）以 `/runtime/*` 載入；三者都由 `packages/server/src/static.js` 的 `assetTree()` 提供（`no-store`，改檔立即生效）。 | 已對齊；若改路徑需同步修改 `index.html` 與 boot-data 的 worker resolver。`/runtime/*` 的 root 由 `runtimeIndexPath` 的 dirname 推導，避免與 `/` 的注入來源分岔。 |
+| `index.html` | Shim 以 `/shim/*` 載入、Obsidian 資產以 `/obsidian/*` 載入、runtime 層（`plugin-watch.js`、`popout.js`）以 `/runtime/*` 載入；三者都由 `packages/server/src/static.js` 的 `assetTree()` 提供（`no-store`，改檔立即生效）。 | 已對齊；若改路徑需同步修改 `index.html` 與 boot-data 的 worker resolver。`/runtime/*` 的 root 由 `runtimeIndexPath` 的 dirname 推導，避免與 `/` 的注入來源分岔。 |
 | `boot-data.js`（Worker resolver） | 只改寫 `worker.js`、`/worker.js`、`sim.js`、`/sim.js` 四種寫法到 `resourcesPath`。 | 外掛以相對 URL 建立的 worker 仍以 document URL 為基準；若 runtime 頁面不在 `/obsidian/`，外掛需自己用絕對路徑。 |
 | `index.html` | 沒有 PWA manifest / service worker。 | `DESIGN.md` §3 第 13 項的行動版需求尚未實作。 |
 | `index.html` | fatal overlay 以 inline style/script 實作，CSP 只限制 `style-src`。 | 若 server 之後加上 `script-src` CSP，inline script 會被擋掉，需改為外部檔案或 nonce。 |
@@ -147,3 +147,28 @@
 | `write.conflictSavedAs` | shim 有轉發，但 Obsidian adapter 沒把結果傳到 UI。 | 需要獨立的 server→client 通知或 `__MYOBS_LAST_CONFLICT` 的 UI 消費端。 |
 | `/api/watch` WebSocket | shim 已接上：`watch-shim.js` 把 WS 事件轉成 adapter 的 `fs.watch` 事件（見 §3b），`plugin-watch.js` 負責 plugin 熱重載。 | 事件粒度、回音過濾與重連補償的落差都列在 §3b。 |
 | `__MYOBS.policy` 注入 | `CONTRACTS.md` §1 的範例是 `policy: {}`，但 renderer 會 `Hx = Object.freeze(sendSync("policy"))` 並用它當功能閘：`PluginManager.enablePlugin()` 第一行就是 `Vx(Hx.plugins, id)`，空物件 → `undefined` → **每個社群外掛、主題、snippet 都載不進來**（`app.plugins.plugins` 永遠是空的，且沒有任何錯誤訊息）。`tools/hotreload-check.mjs` 因此在測試頁面注入 `policy.plugins = true` 才驗得動熱重載。 | `packages/server/src/index.js` 的 `buildBootInfo()` 應注入真實 policy：至少 `{ plugins: true, themes: true, snippets: true }`；`sync`/`publish`/`webViewer`/`devTools`/`insider` 依 `DESIGN.md` §3 第 5 項可為 `false`。shim 不動此欄位（契約屬 server 端）。 |
+
+## 9. 多視窗 popout（`packages/runtime/popout.js`）
+
+桌機版的「Open in new window」在 renderer 內只有一個宿主呼叫：`p0()` 以
+`window.open("about:blank", "_blank", "popup,parented=1,width=…,height=…,x=…,y=…,background=…")`
+開一個新視窗，接著**同步**往該 document 寫入（`<base href>`、eval enhance.js、`h0()`）；
+`x3`（Workspace 的 `"window"` 節點）再 `c.app = t.app`，所以 popout 用的是**同一個 app 物件**。
+因為 `about:blank` 的初始文件與 opener 同源、同瀏覽器行程，這個機制在瀏覽器裡同樣成立——
+**狀態是共享的，不是複本**。這一節記錄的是「桌機有、瀏覽器沒有」的那些部分。
+
+| 位置 | 目前行為 | 正確行為 |
+|---|---|---|
+| `electron-shim.js`（popout realm） | popout 視窗沒有 nodeIntegration，因此 `h0()` 的 `require("electron")` 拿不到東西。`popout.js` 在 `window.open` 返回後**同步**把 `/shim/*`（11 個，見下一列）eval 進 popout realm，並給它一份 `__MYOBS` 複本。 | Electron 直接給新 renderer nodeIntegration；`window.electron` / `window.electronWindow` / `window.require` 都是真的。 |
+| `popout.js`（child shim 集合） | 注入 `boot-data`、`node-globals`、`process`、`electron`、`fs`、`path`、`os`、`url`、`crypto`、`btime`、`require`；**不含 `watch-shim`**。 | 桌機的 popout renderer 有完整 Node。不含 watch-shim 是刻意的：popout realm 沒有 vault adapter，`fs.watch` 落回 fs-shim 的 no-op watcher（§3），因此不需要為它多開一條 `/api/watch` WS（每個 popout 一條）。若某個外掛真的在 popout realm 內 `fs.watch`，它會靜默不觸發。 |
+| `popout.js`（`sessionToken`） | popout realm 有自己的 token（per-document 正確，CONTRACTS §4）。主視窗的寫入仍由主 document 的 token 過濾；popout realm 自己的寫入在主視窗看是**外部變更**（會 reconcile）。 | 桌機只有一個 renderer 在寫，沒有「兩個 document 各自過濾」的情形。 |
+| `popout.js`（features 翻譯） | Obsidian 送的 feature 字串是給它自己的 main process 解析的（`setWindowOpenHandler`）：`background=`、`parented=1`。**Chromium 收到 `background=…` 會讓整個 `window.open()` 回 `null`**（實測：`popup,background=#202020` → null、`popup,width=700,height=500` → Window，且與 `--disable-popup-blocking` 無關）。因此 popout.js 先解析再以 `popup,width=…,height=…[,left=…,top=…]` 重送。 | Electron：main process 解析並套用（`background` → `BrowserWindow.backgroundColor`、`parented` → 視窗父子關係）。 |
+| `popout.js`（`background`） | 以 `position:fixed;z-index:-1` 的覆蓋層模擬「視窗底色」，Obsidian 的 `.app-container` 出現後移除。 | Electron 的 `BrowserWindow.backgroundColor` 在 web content 之前就先畫好，沒有閃白。覆蓋層只能在 document 內著色，第一次 paint 的空窗仍可能有極短的閃爍。 |
+| `popout.js`（預設尺寸） | 未指定尺寸時補 `width=800,height=600`（Electron `BrowserWindow` 預設值）。Chrome 仍會自行調整（實測 800×600 要求 → `innerHeight` 533），位置也可能被 clamp。 | Electron 完全依 features / 預設值決定，且在 `screen.getAllDisplays()` 的重疊判定通過時精確還原座標。 |
+| `popout.js`（彈窗阻擋） | 沒有手勢的 popout 請求（最常見：boot 時還原 `workspace-server.json` 裡的 `"window"` 節點）會被瀏覽器擋掉，`window.open` 回 `null`。Obsidian 自己只會 `console.error("Failed to restore popout window")` 後丟棄該節點；popout.js 另外顯示提示條與「在新視窗開啟目前筆記」重試按鈕（點擊＝手勢）。 | 桌機不需要手勢，開機即還原全部視窗。 |
+| `popout.js`（`#popout=<vault path>`） | URL hash/query 只能當「請求」：Obsidian 的 popout document 是 `about:blank`（無法用 URL 指定），而 `window.open` 需要手勢。因此這個通道顯示提示條，由使用者點擊後以 `app.workspace.openLinkText(path, "", "window")` 開啟。 | 桌機沒有對應功能（`obsidian://` deep link 是另一項）。 |
+| `popout.js`（觸發路徑） | 分頁右鍵選單（「Move to new window」）在 macOS 走**原生選單**（`Menu.useNativeMenu = app.vault.getConfig("nativeMenus") ?? true`），本 runtime 尚未自繪（§2），所以目前可用的觸發只有：命令面板「Open current tab in new window」、拖曳分頁出去、以及上列的 `#popout=` 提示條。 | 需先完成 DESIGN.md §3 第 5 項的「自繪選單列」；`tools/popout-check.mjs` 已把這件事記錄成證據（`menuInDom: 0` 但 `lastMenuItems` 有內容）。 |
+| `electron-shim.js`（`remote.screen`） | 以 `window.screen` 近似出單一 display：`bounds` 用 `width/height`，`workArea` 用 `availWidth/availHeight`（拿不到 macOS 選單列／Dock 的 inset）。Obsidian 只用它做 popout 座標還原的重疊判定。 | Electron 回真實 display 清單與 work area；多螢幕環境下只能看到「目前這一個」。 |
+| `electron-shim.js`（`webContents.zoomLevel`） | 由固定的 `0` 改為 getter/setter，反映 `webFrame` 的 CSS zoom 近似值。 | Electron 的 `zoomLevel` 會影響 devicePixelRatio 與 popout 還原；CSS zoom 不完全等價（§2 `webFrame` 列）。 |
+| `popout.js`（子視窗寫入） | popout realm 的 `fs` shim 走同一組 `/api/fs`（有自己的 token）；`app.vault.modify()` 之類的呼叫其實是主 realm 的 adapter，因此寫入路徑與主視窗完全相同。 | 桌機完全相同（同一 process 共用 adapter）。 |
+

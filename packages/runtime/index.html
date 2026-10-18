@@ -145,8 +145,10 @@
 <script src="/shim/require-shim.js"></script>
 
 <!-- runtime layer: classic scripts that must be installed before app.js runs
-     (plugin hot reload subscribes to watch-shim's event feed) -->
+     (plugin hot reload subscribes to watch-shim's event feed; popout wraps
+     window.open and instruments the popout window before Obsidian writes to it) -->
 <script src="/runtime/plugin-watch.js"></script>
+<script src="/runtime/popout.js"></script>
 
 <script type="text/javascript" defer src="/obsidian/lib/codemirror/codemirror.js"></script>
 <script type="text/javascript" defer src="/obsidian/lib/codemirror/overlay.js"></script>

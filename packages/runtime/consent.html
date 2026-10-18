@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>my-obsidian — 授權聲明確認</title>
+<!-- MYOBS_CONSENT_DATA -->
+<!--
+	Server replaces the marker above with a JSON data island (status, config
+	path). The page is served by the server directly, never through Obsidian's
+	styles, and loads no external resources.
+
+	This file must never contain the string the renderer compares against: it
+	can only come from the operator reading vendor/obsidian/app.js.
+-->
+<style>
+	:root { color-scheme: dark; }
+	* { box-sizing: border-box; }
+	body {
+		margin: 0;
+		background: #101012;
+		color: #e8e8ea;
+		font: 15px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans TC", sans-serif;
+	}
+	main { max-width: 46rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; }
+	.eyebrow {
+		font: 600 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+		letter-spacing: .14em; text-transform: uppercase; color: #e06c75; margin: 0 0 .75rem;
+	}
+	h1 { font-size: 1.6rem; line-height: 1.3; margin: 0 0 .5rem; }
+	h2 { font-size: 1.05rem; margin: 2.25rem 0 .5rem; }
+	p, li { color: #d4d4d8; }
+	.lede { margin: 0 0 1rem; }
+	code, kbd, pre, textarea {
+		font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	}
+	code { background: #1c1c20; border: 1px solid #2c2c31; border-radius: 4px; padding: .1rem .35rem; font-size: .88em; }
+	pre {
+		background: #0c0c0e; border: 1px solid #2c2c31; border-radius: 8px;
+		padding: .9rem 1rem; overflow-x: auto; font-size: 12.5px; line-height: 1.6; color: #b6b6bd;
+		margin: .6rem 0 0;
+	}
+	.card { border: 1px solid #2c2c31; border-radius: 10px; background: #18181b; padding: 1.1rem 1.25rem; margin: 1.25rem 0; }
+	.status-line { margin: 0; font-size: 14px; }
+	.status-accepted { color: #7fd88f; }
+	.status-missing { color: #e5c07b; }
+	textarea {
+		width: 100%; min-height: 9rem; resize: vertical;
+		background: #0c0c0e; color: #e8e8ea; border: 1px solid #3a3a41; border-radius: 8px;
+		padding: .75rem .85rem; font-size: 12.5px; line-height: 1.6;
+	}
+	textarea:focus { outline: 2px solid #4b6cb7; outline-offset: 1px; }
+	label { display: block; font-weight: 600; margin: 0 0 .4rem; }
+	button {
+		font: 500 14px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+		color: #101012; background: #e8e8ea; border: 0; border-radius: 6px;
+		padding: .7rem 1.1rem; cursor: pointer; margin-top: .9rem;
+	}
+	button[disabled] { opacity: .5; cursor: progress; }
+	.msg { margin: 1rem 0 0; border-radius: 8px; padding: .8rem 1rem; font-size: 14px; }
+	.msg-error { background: #2a1416; border: 1px solid #5c2b2f; color: #f0b6bb; }
+	.msg-ok { background: #10241a; border: 1px solid #2c5c3f; color: #a8e6bd; }
+	.msg[hidden] { display: none; }
+	.muted { color: #8a8a93; font-size: 13px; }
+	a { color: #8ab4f8; }
+	.warn { border-left: 3px solid #e5c07b; padding-left: .85rem; }
+</style>
+</head>
+<body>
+<main>
+	<p class="eyebrow">my-obsidian</p>
+	<h1>授權聲明確認</h1>
+	<p class="lede">
+		Obsidian 的 renderer 在啟動時會向宿主（這個 server）索取一段聲明字串，並與它自己內建的那份
+		<strong>逐字元比對</strong>；不符就中止啟動。因此 server 必須拿到那段字串才能把 renderer 送進瀏覽器。
+	</p>
+	<p class="lede">
+		這段字串<strong>不存在於本專案的程式碼裡</strong>。它只能由操作者本人從本機的
+		<code>vendor/obsidian/app.js</code> 取出，貼到下面的欄位，寫入 server 設定檔後注入 renderer。
+		按下確認的人，就是做出該聲明的人。
+	</p>
+
+	<div class="card">
+		<p class="status-line" id="status-line">讀取目前狀態…</p>
+		<p class="muted" id="status-detail"></p>
+	</div>
+
+	<h2>步驟一：從 vendor bundle 取出字串</h2>
+	<p>
+		bundle 內只有一處 <code>sendSync("terms")</code>，比對用的字面值就緊接在它前面。
+		在專案根目錄執行（macOS 會直接放進剪貼板；其他系統請去掉 <code>| pbcopy</code>，自行複製輸出）：
+	</p>
+	<pre id="extract-cmd">grep -o '"[^"]\{40,\}"[^"]*sendSync("terms")' vendor/obsidian/app.js | sed 's/^"//; s/".*$//' | pbcopy</pre>
+	<p class="muted">
+		也可以在編輯器打開 <code>vendor/obsidian/app.js</code>，搜尋 <code>sendSync("terms")</code>，
+		複製它左邊的那個字串字面值。請完整複製，不要手打、不要改寫。
+	</p>
+	<p class="muted">同一件事用 Node 做（與 <code>tools/lib/cdp.mjs</code> 的取出方式相同）：</p>
+	<pre>node -e 'const fs=require("fs");const s=fs.readFileSync("vendor/obsidian/app.js","utf8");const at=s.indexOf(".ipcRenderer.sendSync(\"terms\")");const o=s.lastIndexOf("\"",at-2);const c=s.lastIndexOf("\"",o-1);process.stdout.write(s.slice(c+1,o))' | pbcopy</pre>
+
+	<h2>步驟二：貼上並確認</h2>
+	<form id="consent-form" novalidate>
+		<label for="terms">聲明字串（貼上後請確認頭尾沒有多餘空白）</label>
+		<textarea id="terms" name="termsText" spellcheck="false" autocomplete="off"
+			placeholder="在此貼上 vendor/obsidian/app.js 內的字面值"></textarea>
+		<p class="muted" id="config-hint"></p>
+		<button type="submit" id="submit">我確認，並寫入設定檔</button>
+		<p class="msg msg-error" id="msg-error" hidden role="alert"></p>
+		<p class="msg msg-ok" id="msg-ok" hidden role="status"></p>
+	</form>
+
+	<h2>這個聲明是什麼，以及它的界線</h2>
+	<div class="warn">
+		<p style="margin-top:0">
+			把 bundle 送進他人的瀏覽器，在字面上就落在該聲明的射程內。
+			<strong>私有自用</strong>（自己機器、自己 vault）與<strong>對其他人提供服務</strong>是兩件不同的事；
+			後者需要 Obsidian team 的明示同意。這個判斷由操作者承擔。
+		</p>
+		<p style="margin-bottom:0" class="muted">
+			server 只做兩件事：把你確認過的同一段字串注入 renderer 的 boot 物件，以及在你未確認前拒絕提供
+			<code>/obsidian/app.js</code>。
+		</p>
+	</div>
+
+	<h2>其他寫入方式</h2>
+	<p class="muted">
+		沒有瀏覽器可用時，也可以沿用環境變數 <code>TERMS_ACK</code>（它優先於設定檔）；同一台機器上兩者擇一即可。
+		設定檔路徑由 <code>MYOBS_CONFIG</code> 決定，預設是 <code>~/.config/my-obsidian/config.json</code>，
+		權限為目錄 <code>0700</code>、檔案 <code>0600</code>。
+	</p>
+</main>
+
+<script>
+(function () {
+	"use strict";
+
+	var MIN_LENGTH = 40;
+	var form = document.getElementById("consent-form");
+	var field = document.getElementById("terms");
+	var submit = document.getElementById("submit");
+	var errorBox = document.getElementById("msg-error");
+	var okBox = document.getElementById("msg-ok");
+	var statusLine = document.getElementById("status-line");
+	var statusDetail = document.getElementById("status-detail");
+	var configHint = document.getElementById("config-hint");
+
+	var data = readData();
+	var configPath = data && typeof data.configPath === "string" ? data.configPath : null;
+	var minLength = data && Number.isInteger(data.minLength) ? data.minLength : MIN_LENGTH;
+	var sourceLabels = {
+		option: "由啟動參數提供（options.termsText）",
+		env: "由環境變數 TERMS_ACK 提供",
+		config: "由設定檔提供"
+	};
+
+	if (configHint) {
+		configHint.textContent = configPath
+			? "按下確認後會寫入：" + configPath
+			: "按下確認後會寫入 server 的設定檔（~/.config/my-obsidian/config.json，可用 MYOBS_CONFIG 覆寫）。";
+	}
+	renderStatus();
+
+	function readData() {
+		var el = document.getElementById("myobs-consent-data");
+		if (!el) return null;
+		try {
+			return JSON.parse(el.textContent || "{}");
+		} catch (err) {
+			// A broken data island must not break the form; the server still
+			// validates whatever is submitted.
+			return null;
+		}
+	}
+
+	function renderStatus() {
+		if (!data) {
+			statusLine.textContent = "無法讀取 server 狀態（本頁可能不是由 server 提供）";
+			statusLine.className = "status-line status-missing";
+			statusDetail.textContent = "仍可直接送出；server 會檢查字串長度並寫入設定檔。";
+			return;
+		}
+		if (data.accepted) {
+			statusLine.textContent = "已完成確認，renderer 可以啟動";
+			statusLine.className = "status-line status-accepted";
+			var label = sourceLabels[data.source] || "來源不明";
+			statusDetail.textContent =
+				"目前字串" + label + "。" +
+				(data.source === "env"
+					? "環境變數優先於設定檔，只寫入設定檔不會改變現況；若要改用設定檔，請移除 TERMS_ACK 後重新啟動。"
+					: "重新送出會覆寫設定檔內容。");
+			return;
+		}
+		statusLine.textContent = "尚未完成確認，renderer 不會啟動";
+		statusLine.className = "status-line status-missing";
+		statusDetail.textContent = "/ 目前顯示本頁，/obsidian/app.js 回 403。寫入成功後立即生效，不需要重新啟動 server。";
+	}
+
+	function showError(message) {
+		okBox.hidden = true;
+		errorBox.textContent = message;
+		errorBox.hidden = false;
+	}
+
+	function showOk(html) {
+		errorBox.hidden = true;
+		okBox.innerHTML = html;
+		okBox.hidden = false;
+	}
+
+	form.addEventListener("submit", function (event) {
+		event.preventDefault();
+		// Leading/trailing whitespace is the usual copy artefact and would make
+		// the renderer's verbatim comparison fail, so it is trimmed here too.
+		var value = field.value.trim();
+
+		if (value === "") {
+			showError("欄位是空的。請先從 vendor/obsidian/app.js 取出字串再貼上。");
+			field.focus();
+			return;
+		}
+		if (value.length < minLength) {
+			showError(
+				"只有 " + value.length + " 個字元，短於 " + minLength +
+				"；這看起來是複製不完整。請重新取出完整字串（不要只貼一部分）。"
+			);
+			field.focus();
+			return;
+		}
+
+		submit.disabled = true;
+		fetch("/api/consent", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ termsText: value })
+		}).then(function (response) {
+			return response.json().then(function (body) {
+				return { status: response.status, body: body };
+			}).catch(function () {
+				return { status: response.status, body: null };
+			});
+		}).then(function (result) {
+			if (result.status === 200 && result.body && result.body.ok) {
+				showOk(
+					"已寫入，請重新載入。<a href=\"/\">前往 / 啟動 renderer</a>"
+				);
+				statusLine.textContent = "已完成確認，renderer 可以啟動";
+				statusLine.className = "status-line status-accepted";
+				field.value = value;
+				return;
+			}
+			var message =
+				result.body && result.body.error && result.body.error.message
+					? result.body.error.message
+					: "寫入失敗（HTTP " + result.status + "）";
+			showError(message);
+		}).catch(function (err) {
+			showError("送出失敗：" + (err && err.message ? err.message : String(err)));
+		}).then(function () {
+			submit.disabled = false;
+		});
+	});
+})();
+</script>
+</body>
+</html>

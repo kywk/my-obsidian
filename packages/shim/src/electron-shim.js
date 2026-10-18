@@ -231,7 +231,18 @@
 			return false;
 		},
 		"file-url": function () {
-			return boot.resourcesPath || "/obsidian";
+			// This channel feeds Platform.resourcePathPrefix, which
+			// FileSystemAdapter#getResourcePath prepends to the vault-relative
+			// path to build attachment URLs (CONTRACTS.md §1: resourcePrefix is
+			// "for adapter.getResourcePath"). Returning resourcesPath here --
+			// the app asset root -- produced URLs like
+			// "/obsidianprivate/var/…/image.png", which the /obsidian/* static
+			// route swallowed as a 404. Every attachment, PDF and media URL was
+			// broken and /v/* was never reached (DESIGN.md §11.7).
+			//
+			// `resources` below genuinely means the app resource directory and
+			// must keep returning resourcesPath.
+			return boot.resourcePrefix || "/v/";
 		},
 		resources: function () {
 			return boot.resourcesPath || "/obsidian";
@@ -825,7 +836,15 @@
 		var session = makeSession();
 		webContentsStub = {
 			id: 1,
-			zoomLevel: 0,
+			// Obsidian serializes the popout zoom as `webContents.zoomLevel` and
+			// restores it with setFrameZoomLevel(); a hard-coded 0 would reset
+			// every restored popout to 100%.
+			get zoomLevel() {
+				return webFrame.getZoomLevel();
+			},
+			set zoomLevel(level) {
+				webFrame.setZoomLevel(level);
+			},
 			session: session,
 			debugger: makeDebugger(),
 			getZoomLevel: function () {
@@ -998,6 +1017,62 @@
 		return windowStub;
 	}
 
+	// ---------------------------------------------------------------------
+	// remote.screen — only what Obsidian reads: it asks for the displays to
+	// decide whether a popout window's restored coordinates are still on a
+	// screen (vendor/obsidian/app.js @ ~2831614). Without this stub that check
+	// silently fails and every restored popout is re-centered.
+	// ---------------------------------------------------------------------
+
+	function makeDisplay() {
+		var screenRef = window.screen || {};
+		var width = screenRef.width || window.innerWidth || 1280;
+		var height = screenRef.height || window.innerHeight || 800;
+		// The browser does not expose work-area insets (menu bar, Dock, taskbar);
+		// availWidth/availHeight are the closest thing available.
+		var workWidth = screenRef.availWidth || width;
+		var workHeight = screenRef.availHeight || height;
+		return {
+			id: 1,
+			label: "my-obsidian",
+			bounds: { x: 0, y: 0, width: width, height: height },
+			workArea: { x: 0, y: 0, width: workWidth, height: workHeight },
+			workAreaSize: { width: workWidth, height: workHeight },
+			size: { width: width, height: height },
+			scaleFactor: window.devicePixelRatio || 1,
+			rotation: 0,
+			internal: true,
+			touchSupport: "unknown"
+		};
+	}
+
+	var screenStub = {
+		getPrimaryDisplay: makeDisplay,
+		getAllDisplays: function () {
+			return [makeDisplay()];
+		},
+		getDisplayNearestPoint: makeDisplay,
+		getDisplayMatching: makeDisplay,
+		getCursorScreenPoint: function () {
+			return { x: Math.round(window.screenX || 0), y: Math.round(window.screenY || 0) };
+		},
+		on: function () {
+			return screenStub;
+		},
+		once: function () {
+			return screenStub;
+		},
+		addListener: function () {
+			return screenStub;
+		},
+		off: function () {
+			return screenStub;
+		},
+		removeListener: function () {
+			return screenStub;
+		}
+	};
+
 	var remote = {
 		app: appStub,
 		safeStorage: safeStorage,
@@ -1007,6 +1082,7 @@
 		dialog: dialogStub,
 		Menu: menuModule,
 		MenuItem: MenuItemStub,
+		screen: screenStub,
 		nativeImage: {
 			createFromPath: makeNativeImage,
 			createFromBuffer: makeNativeImage,

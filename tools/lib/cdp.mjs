@@ -207,3 +207,128 @@ export async function launchChrome(port) {
   }
   throw new Error('Chrome did not expose a debugging endpoint');
 }
+
+// ---------------------------------------------------------------- page helpers
+//
+// Additions for harnesses that need more than one page (popout windows) or real
+// input events. Everything below is implemented on top of Cdp.send(), so the
+// existing exports above are untouched.
+
+/**
+ * @param {Cdp} cdp
+ * @param {string} targetId
+ * @returns {Promise<string>} sessionId
+ */
+export async function attachToPage(cdp, targetId) {
+  const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+  return sessionId;
+}
+
+/**
+ * Create a page target and attach to it.
+ *
+ * @param {Cdp} cdp
+ * @param {string} [url]
+ * @returns {Promise<{ targetId: string, sessionId: string }>}
+ */
+export async function newPage(cdp, url = 'about:blank') {
+  const { targetId } = await cdp.send('Target.createTarget', { url });
+  const sessionId = await attachToPage(cdp, targetId);
+  return { targetId, sessionId };
+}
+
+/**
+ * Every open page target, including popups opened with window.open().
+ *
+ * @param {Cdp} cdp
+ * @returns {Promise<Array<{ targetId: string, url: string, title: string }>>}
+ */
+export async function listPageTargets(cdp) {
+  const { targetInfos } = await cdp.send('Target.getTargets');
+  return (targetInfos ?? [])
+    .filter((t) => t.type === 'page')
+    .map((t) => ({ targetId: t.targetId, url: t.url, title: t.title, attached: t.attached }));
+}
+
+/**
+ * @param {Cdp} cdp
+ * @param {string} targetId
+ */
+export async function activateTarget(cdp, targetId) {
+  await cdp.send('Target.activateTarget', { targetId }).catch(() => {});
+}
+
+/**
+ * Evaluate an expression in a page session. Throws with the page's own error
+ * message when the expression throws, so a failing assertion is never silently
+ * undefined.
+ *
+ * @param {Cdp} cdp
+ * @param {string} sessionId
+ * @param {string} expression
+ * @param {{ awaitPromise?: boolean, userGesture?: boolean }} [options]
+ * @returns {Promise<any>}
+ */
+export async function evalInPage(cdp, sessionId, expression, options = {}) {
+  const res = await cdp.send(
+    'Runtime.evaluate',
+    {
+      expression,
+      awaitPromise: options.awaitPromise !== false,
+      returnByValue: true,
+      userGesture: options.userGesture === true,
+    },
+    sessionId,
+  );
+  if (res.exceptionDetails) {
+    const ex = res.exceptionDetails;
+    throw new Error(
+      ex.exception?.description || ex.exception?.value || ex.text || 'evaluate failed',
+    );
+  }
+  return res.result?.value;
+}
+
+/**
+ * Poll an expression in a page session until it is truthy.
+ *
+ * @param {Cdp} cdp
+ * @param {string} sessionId
+ * @param {string} expression
+ * @param {number} timeoutMs
+ * @returns {Promise<boolean>}
+ */
+export async function waitForPage(cdp, sessionId, expression, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    // A target that is still starting up has no execution context yet; that is
+    // a "not yet", not a failure.
+    const value = await evalInPage(cdp, sessionId, expression).catch(() => undefined);
+    if (value) return true;
+    await sleep(150);
+  }
+  return false;
+}
+
+/**
+ * Dispatch a real (trusted) mouse click through the input domain. This is the
+ * only way to exercise code paths that require a user gesture -- window.open()
+ * for popouts, for example -- because Runtime.evaluate cannot produce one
+ * without faking it.
+ *
+ * @param {Cdp} cdp
+ * @param {string} sessionId
+ * @param {{ x: number, y: number }} point viewport coordinates (CSS pixels)
+ * @param {{ button?: 'left' | 'right' | 'middle', clickCount?: number }} [options]
+ * @returns {Promise<void>}
+ */
+export async function clickAt(cdp, sessionId, point, options = {}) {
+  const button = options.button ?? 'left';
+  const clickCount = options.clickCount ?? 1;
+  const buttons = button === 'left' ? 1 : button === 'right' ? 2 : 4;
+  const base = { x: Math.round(point.x), y: Math.round(point.y), button, clickCount };
+  await cdp.send('Input.dispatchMouseEvent', { ...base, type: 'mouseMoved', buttons: 0 }, sessionId);
+  await cdp.send('Input.dispatchMouseEvent', { ...base, type: 'mousePressed', buttons }, sessionId);
+  await cdp.send('Input.dispatchMouseEvent', { ...base, type: 'mouseReleased', buttons: 0 }, sessionId);
+}
+

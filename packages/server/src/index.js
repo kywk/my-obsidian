@@ -9,8 +9,14 @@
  *   HOST            default 127.0.0.1
  *   WATCH_DISABLED  set to 1 to skip chokidar
  *   AUTH_TOKEN      optional; requires cookie myobs_token=<AUTH_TOKEN>
- *   TERMS_ACK       optional; without it / serves an explanation page and
- *                   /obsidian/app.js is not served
+ *   MYOBS_CONFIG    consent config file (default ~/.config/my-obsidian/config.json)
+ *   TERMS_ACK       optional; the acknowledgement string itself. When neither
+ *                   this nor a stored config holds one, GET / serves the consent
+ *                   page (GET /consent, POST /api/consent) and /obsidian/app.js
+ *                   answers 403.
+ *
+ * Consent precedence: options.termsText -> TERMS_ACK -> MYOBS_CONFIG file.
+ * Recording consent through POST /api/consent takes effect without a restart.
  */
 
 import { timingSafeEqual } from 'node:crypto';
@@ -26,6 +32,12 @@ import { handleFsRequest } from './fs-api.js';
 import { registerStaticRoutes } from './static.js';
 import { registerFileRoutes } from './files.js';
 import { createVaultWatcher } from './watch.js';
+import {
+  createConsentState,
+  defaultConfigPath,
+  registerConsentRoutes,
+  withConsentTerms,
+} from './consent.js';
 
 export const DEFAULT_VENDOR_DIR = fileURLToPath(
   new URL('../../../vendor/obsidian/', import.meta.url),
@@ -121,7 +133,10 @@ async function detectObsidianVersion(vendorDir) {
  *
  * @param {object} options
  * @param {string} options.vaultPath Canonical absolute vault path.
- * @param {boolean} options.termsAccepted
+ * @param {object} [options.consent] Live consent holder; when given, the terms
+ *   fields reflect it at call time.
+ * @param {boolean} [options.termsAccepted] Snapshot form, for callers that build
+ *   a boot object by hand instead of passing a holder.
  * @param {string} [options.termsText]
  * @param {string} [options.vendorDir]
  * @param {string} [options.version]
@@ -157,7 +172,7 @@ export const DEFAULT_POLICY = Object.freeze({
 });
 
 export async function buildBootInfo(options) {
-  const { vaultPath, termsAccepted } = options;
+  const { vaultPath } = options;
   const vendorDir = options.vendorDir ?? DEFAULT_VENDOR_DIR;
   const detected = await detectObsidianVersion(vendorDir);
 
@@ -179,12 +194,18 @@ export async function buildBootInfo(options) {
     documentsDir: path.join(os.homedir(), 'Documents'),
     desktopDir: path.join(os.homedir(), 'Desktop'),
     policy: options.policy ?? DEFAULT_POLICY,
-    termsAccepted,
     devMode: process.env.DEV_MODE === '1',
   };
 
-  if (termsAccepted) {
-    boot.termsText = options.termsText ?? process.env.TERMS_ACK ?? '';
+  // The terms fields are live state, not build-time state: whatever serves the
+  // page applies them from the holder per request, so recording consent takes
+  // effect without a restart (CONTRACTS.md §1).
+  if (options.consent) return withConsentTerms(boot, options.consent);
+  if (options.termsAccepted !== undefined) {
+    boot.termsAccepted = options.termsAccepted;
+    if (options.termsAccepted) {
+      boot.termsText = options.termsText ?? process.env.TERMS_ACK ?? '';
+    }
   }
 
   return boot;
@@ -194,8 +215,13 @@ export async function buildBootInfo(options) {
  * @param {object} [options]
  * @param {string} [options.vaultPath] Defaults to VAULT_PATH.
  * @param {string} [options.host] Unused by buildApp; consumed by start().
- * @param {boolean} [options.termsAccepted] Defaults to Boolean(TERMS_ACK).
- * @param {string} [options.termsText] Defaults to TERMS_ACK; injected only when accepted.
+ * @param {string} [options.termsText] Highest-precedence acknowledgement text.
+ * @param {boolean} [options.termsAccepted] Only `false` is meaningful: close the
+ *   gate regardless of every text source. Never marks a vault accepted.
+ * @param {string} [options.envTermsText] Overrides TERMS_ACK (for tests).
+ * @param {string} [options.configPath] Consent config; defaults to MYOBS_CONFIG
+ *   or ~/.config/my-obsidian/config.json.
+ * @param {string} [options.consentHtmlPath] Consent page template.
  * @param {string} [options.authToken] Defaults to AUTH_TOKEN (empty = off).
  * @param {boolean} [options.watch] Defaults to WATCH_DISABLED !== '1'.
  * @param {boolean | object} [options.logger]
@@ -216,10 +242,17 @@ export async function buildApp(options = {}) {
   // Acceptance is "the operator supplied the acknowledgement text", not "some
   // variable is set". TERMS_ACK=1 used to mark the vault accepted while feeding
   // "1" to the renderer's sendSync("terms"), which makes Obsidian call
-  // window.close() and stall on the fatal screen. Derive it from the string.
-  const termsText = options.termsText ?? process.env.TERMS_ACK ?? '';
-  const termsAccepted =
-    options.termsAccepted ?? termsText.trim().length > 0;
+  // window.close() and stall on the fatal screen. `consent.termsAccepted` is
+  // therefore derived from the text on every read, and the config file is
+  // re-read so a POST /api/consent applies without a restart.
+  const configPath = options.configPath ?? defaultConfigPath();
+  const consent = createConsentState({
+    termsText: options.termsText,
+    termsAccepted: options.termsAccepted,
+    envTermsText:
+      options.envTermsText !== undefined ? options.envTermsText : process.env.TERMS_ACK,
+    configPath,
+  });
   const authToken =
     options.authToken !== undefined
       ? options.authToken
@@ -234,8 +267,6 @@ export async function buildApp(options = {}) {
     options.boot ??
     (await buildBootInfo({
       vaultPath: vault.root,
-      termsAccepted,
-      termsText,
       vendorDir,
     }));
 
@@ -357,13 +388,36 @@ export async function buildApp(options = {}) {
     return reply.type('application/json; charset=utf-8').send(response);
   });
 
+  registerConsentRoutes(app, {
+    configPath,
+    consentHtmlPath: options.consentHtmlPath,
+    getTermsText: () => consent.termsText,
+    getSource: () => consent.source,
+    onAccepted: () => {
+      // The holder re-reads the config file on every access, so there is
+      // nothing to invalidate -- say so in the log, without the value itself.
+      app.log.info(
+        { configPath },
+        'consent recorded; the renderer gate opens without a restart',
+      );
+    },
+  });
+
   registerStaticRoutes(app, {
     vendorDir,
     shimDir,
     runtimeIndexPath,
     boot,
-    termsAccepted,
+    // Not a snapshot: the terms gate is read per request so POST /api/consent
+    // is reflected immediately on / and /obsidian/app.js.
+    consent,
+    configPath,
+    consentHtmlPath: options.consentHtmlPath,
   });
+
+  // Exposed for start()'s startup banner and for tests; the holder is the
+  // single source of truth for the gate.
+  if (!app.hasDecorator('consent')) app.decorate('consent', consent);
 
   registerFileRoutes(app, {
     vault,
@@ -418,9 +472,18 @@ export async function start() {
     process.exit(1);
   }
 
-  if (!process.env.TERMS_ACK) {
+  if (!app.consent.termsAccepted) {
     app.log.warn(
-      'TERMS_ACK 未設定：GET / 會顯示說明頁，且 /obsidian/app.js 不會提供。',
+      [
+        '尚未完成授權聲明確認：GET / 顯示同意頁，/obsidian/app.js 回 403。',
+        '請在同意頁按下確認（寫入後立即生效，不需重啟），或設定 TERMS_ACK 環境變數。',
+        `設定檔位置：${defaultConfigPath()}（可用 MYOBS_CONFIG 覆寫）`,
+      ].join('\n'),
+    );
+  } else {
+    app.log.info(
+      { source: app.consent.source },
+      'consent 已設定；未顯示字串本身',
     );
   }
   if (process.env.WATCH_DISABLED === '1') {

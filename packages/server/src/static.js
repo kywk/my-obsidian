@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isInside } from './paths.js';
+import { consentPage, withConsentTerms } from './consent.js';
 
 export const BOOT_MARKER = '<!-- MYOBS_BOOT -->';
 
@@ -119,18 +120,26 @@ export function injectBoot(template, boot) {
 }
 
 /**
+ * The gate page shown while the operator has not recorded consent.
+ *
+ * Delegates to consentPage() so GET / and GET /consent are the same page: the
+ * one the operator uses to record the acknowledgement (DESIGN.md §8). It is not
+ * a plain explanation page any more.
+ *
+ * @param {object} options
+ * @param {string} [options.consentHtmlPath]
+ * @param {string} [options.configPath]
+ * @param {{ termsAccepted: boolean, termsText: string, source?: string|null }} options.consent
  * @returns {string}
  */
-function termsPage() {
-  return `<!doctype html>
-<html><head><meta charset="utf-8"><title>my-obsidian — 尚未完成條款確認</title>
-<style>body{font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1.5rem;line-height:1.7;color:#222}code{background:#f2f2f2;padding:.15rem .35rem;border-radius:4px}</style>
-</head><body>
-<h1>尚未完成條款確認</h1>
-<p>這個伺服器還沒有設定 <code>TERMS_ACK</code>，因此不會載入 Obsidian renderer，也不提供 <code>/obsidian/app.js</code>。</p>
-<p>請由操作者本人完成 Obsidian 授權條款的確認，將確認結果設定為 <code>TERMS_ACK</code> 環境變數後重新啟動服務。專案程式碼不內建該條款字串。</p>
-</body></html>
-`;
+function termsPage(options) {
+  const { consent } = options;
+  return consentPage({
+    consentHtmlPath: options.consentHtmlPath,
+    configPath: options.configPath,
+    accepted: consent.termsAccepted,
+    source: consent.source ?? null,
+  });
 }
 
 /**
@@ -151,12 +160,27 @@ function vendorMissingMessage(vendorDir, relativePath) {
  * @param {object} options
  * @param {string} options.vendorDir
  * @param {string} options.runtimeIndexPath
- * @param {object} options.boot
- * @param {boolean} options.termsAccepted
+ * @param {object} options.boot Base boot object; the terms fields are added per
+ *   request from `consent` so the gate follows the consent state without a
+ *   restart (CONTRACTS.md §1).
+ * @param {{ termsAccepted: boolean, termsText: string, source?: string|null }} options.consent
+ *   Live consent holder, read on every request. A plain snapshot is still
+ *   accepted as a fallback below so an out-of-tree caller does not break.
+ * @param {boolean} [options.termsAccepted] Legacy snapshot, only used when
+ *   `consent` is absent.
+ * @param {string} [options.configPath] Consent config path, shown on the page.
+ * @param {string} [options.consentHtmlPath] Consent page template.
  * @returns {void}
  */
 export function registerStaticRoutes(app, options) {
-  const { vendorDir, shimDir, runtimeIndexPath, boot, termsAccepted } = options;
+  const { vendorDir, shimDir, runtimeIndexPath, boot } = options;
+  const consent =
+    options.consent ??
+    Object.freeze({
+      termsAccepted: Boolean(options.termsAccepted),
+      termsText: options.termsAccepted ? options.termsText ?? '' : '',
+      source: null,
+    });
 
   /**
    * Serves one asset tree with containment checks and symlink verification.
@@ -186,11 +210,17 @@ export function registerStaticRoutes(app, options) {
       const reject = () =>
         reply.code(404).type('text/plain; charset=utf-8').send(missing(requested));
 
-      if (opts.gateAppJs && relative === 'app.js' && !termsAccepted) {
+      if (opts.gateAppJs && relative === 'app.js' && !consent.termsAccepted) {
         return reply
           .code(403)
           .type('text/plain; charset=utf-8')
-          .send('尚未設定 TERMS_ACK，依照 CONTRACTS.md §1 不提供 /obsidian/app.js。');
+          .send(
+            [
+              '尚未完成授權聲明確認，依照 CONTRACTS.md §1 不提供 /obsidian/app.js。',
+              '請開 GET / 完成同意畫面上的確認（或設定 TERMS_ACK 環境變數後重新啟動）。',
+              '寫入設定檔後立即生效，不需要重新啟動 server。',
+            ].join('\n'),
+          );
       }
 
       if (
@@ -312,10 +342,20 @@ export function registerStaticRoutes(app, options) {
   });
 
   app.get('/', async (request, reply) => {
+    // Consent state changes without a restart, so this page must never be
+    // cached -- a stale copy would keep showing the gate (or leak past it).
     reply.header('Cache-Control', 'no-store');
 
-    if (!termsAccepted) {
-      return reply.type('text/html; charset=utf-8').send(termsPage());
+    if (!consent.termsAccepted) {
+      return reply
+        .type('text/html; charset=utf-8')
+        .send(
+          termsPage({
+            consent,
+            configPath: options.configPath,
+            consentHtmlPath: options.consentHtmlPath,
+          }),
+        );
     }
 
     let template;
@@ -332,6 +372,6 @@ export function registerStaticRoutes(app, options) {
 
     return reply
       .type('text/html; charset=utf-8')
-      .send(injectBoot(template, boot));
+      .send(injectBoot(template, withConsentTerms(boot, consent)));
   });
 }

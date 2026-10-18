@@ -75,7 +75,7 @@ my-obsidian/
 | 2 | Renderer 來源與版本 | 本機 `/Applications/Obsidian.app/Contents/Resources/obsidian.asar`，版本跟隨安裝版（1.14.4）；`scripts/fetch-obsidian.mjs` 取得 |
 | 3 | `terms` 閘 | **首啟同意畫面**：使用者本人按下同意 → 存 server config → 注入 `sendSync("terms")`。**程式碼不內建該字串**。未同意則拒絕啟動並顯示明確錯誤（不可停在白色載入動畫） |
 | 4 | MVP 驗收邊界 | 編輯／預覽、檔案樹、分頁與分割、搜尋、標籤／反向連結、圖譜、Canvas、命令面板、核心 plugin 全數、社群 plugin 可安裝啟用、主題／片段 |
-| 5 | 桌面專屬功能 | **MVP 要**：多視窗 popout、自繪選單列、右鍵選單、列印 PDF、手機寬度降級。**降級**：外部 App 開啟（檔案→下載）、`obsidian://`→ web URL。**不做**：全域快捷鍵、系統匣、CLI、Sync/Publish |
+| 5 | 桌面專屬功能 | **MVP 要**：多視窗 popout（**已實作**，見 §11.8）、自繪選單列、右鍵選單、列印 PDF、手機寬度降級。**降級**：外部 App 開啟（檔案→下載）、`obsidian://`→ web URL。**不做**：全域快捷鍵、系統匣、CLI、Sync/Publish |
 | 6 | Plugin 支援深度 | **L2**：瀏覽器端 Node polyfill + `fs`→RPC。L3（server 端執行）僅保留架構空間，不實作 |
 | 7 | 部署與存取控制 | 預設 bind `127.0.0.1`；`--host 0.0.0.0 --auth-token` 才對外；TLS 交給 reverse proxy。單一 vault，路由 `/v/<vaultId>/` 預留多 vault |
 | 8 | 資料一致性 | **server 為單一寫入者**為原則；外部寫入者存在時採條件寫入 + conflict copy（見 §6） |
@@ -176,7 +176,14 @@ Obsidian 的 `write()` 不是原子寫入（無 temp+rename），因此：
 
 **本專案的處置**：程式碼不內建該字串；首次啟動顯示同意畫面，由操作者本人確認後寫入
 server config，再由此注入（契約欄位為 `termsText`，見 `CONTRACTS.md` §1）。
-未設定時服務拒絕啟動並輸出明確說明。
+
+**已實作介面**：`GET /consent`（未同意時 `GET /` 是同一頁，`packages/runtime/consent.html`）
+→ `POST /api/consent` → 原子寫入 server config（`MYOBS_CONFIG`，預設
+`~/.config/my-obsidian/config.json`，目錄 0700／檔案 0600）→ **立即生效，不需重啟**
+（`termsAccepted` 每次請求由「`termsText` 非空」重新推導；config 被刪除時閘門自動關上）。
+`TERMS_ACK` 環境變數保留為 fallback 且優先於 config 檔。
+
+未同意時服務**照常啟動**，只是 `/` 回同意頁、`/obsidian/app.js` 回 403，並在 log 輸出警告與 config 路徑。
 
 **必須理解的界線**：把 bundle 送進他人的瀏覽器，在字面上就落在該聲明的射程內。
 私有自用（自己機器、自己 vault）與對外提供服務是兩件不同的事，後者需要 Obsidian team 的
@@ -304,4 +311,48 @@ binaryRoundTrip: false   →   加入 node-globals-shim.js 後   →   binaryRou
 對 `~/kywk/obsidian` 的 16 個已啟用 plugin：**載入 14 個**。
 唯二未載入的是 `vault-feed-reader` 與 `geo-story-map`，兩者都 `require("node:child_process")` ——
 這是 `DESIGN.md` §7 明定的 L2 邊界，不是缺陷。
+
+### 11.7 附件路徑 `/v/*` 的首次實測 —— 兩個原因疊在一起
+
+兩輪 spike 的 `/v/*` 請求數都是 0。第一個原因是測試從沒渲染過含附件的筆記
+（`spike-check.mjs` 只驗文字與 `writeBinary`，走 `/api/fs`）。**第二個才是決定性的**：
+
+`FileSystemAdapter` 的 `resourcePathPrefix` 來自 `sendSync("file-url")`，
+而 shim 的 handler 回傳 `resourcesPath`（`/obsidian`）。於是每個附件 URL 都長成
+`/obsidianprivate/var/…/image.png`，被 `/obsidian/*` 靜態路由接走 → 404。
+**請求永遠到不了 `/v/*`。** 修掉那一行（`boot.resourcePrefix || "/v/"`）之後，
+`tools/attachment-check.mjs` 從 1/10 變成全數通過，`/v/` 請求從 5（全 404）變成 39（全 200）。
+
+同一輪實測確認的三件事：
+
+- URL 是**逐段 percent-encode**（由 shim 的 `url.pathToFileURL` 決定）；
+  server 端**不得再解碼一次** —— 多解一次會讓檔名含 `%XX` 的檔案回傳錯誤的位元組（HTTP 200）。
+- `Range` 必須三態：看不懂的 range set 要忽略回 200，只有落在檔案外才 416。
+- `.md` 必須給 `text/markdown; charset=utf-8`，否則瀏覽器會下載而不是顯示。
+
+### 11.8 多視窗 popout：不是第二個 app，是同一個 app 的第二個 DOM 表面
+
+我原先的假設（「popout = 二次載入 `/`，跨視窗只能靠檔案 + watch 同步」）**是錯的**。
+REA 顯示 Obsidian 的做法是：
+
+```js
+const s = window.open("about:blank", "_blank", "popup,width=…,height=…,background=…");
+s.document.head.appendChild(createEl("base", {href: location.href}));
+c.app = t.app;                    // ← 同一個 app 物件，同一個 renderer heap
+```
+
+同源的初始 `about:blank` document 由母視窗的 renderer 直接寫入，新視窗拿到的是
+**母視窗的 `app` 物件本體**，不是複本。狀態共享是物件共享，不是 IPC、也不是檔案輪詢。
+
+因此「二次載入 `/`」在架構上是錯的：那會產生第二個 app 實例（第二次 vault 掃描、
+第二個 metadata worker、兩份 plugin onload、兩個 `workspace-server.json` 寫入者），
+與 §2 的單一寫入者原則直接衝突。正確做法是沿用 Obsidian 自己的機制，只補 popout realm 缺的 shim。
+
+**還有一個 Chromium 專屬陷阱**：Electron 的 feature 字串不能直接轉發。
+`window.open(…, "popup,background=#202020")` 在 Chromium 回 `null`（即使允許彈窗），
+必須由宿主扮演 Obsidian `main.js` 的 roles 解析，翻譯成 `popup,width,height[,left,top]`。
+
+實測能力邊界：popout 可用時間 3–42 ms、顯示指定筆記 31–153 ms；樣式同步（同一份 `app.css`）；
+parity 缺口是「開機自動還原 popout」需要手勢（瀏覽器擋），以及分頁右鍵的
+`Move to new window` 走原生選單（依賴尚未實作的「自繪選單列」）。
 

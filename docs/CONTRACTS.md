@@ -15,6 +15,9 @@ Server 在 HTML 中注入一段同步可用的 JSON，**必須早於任何 shim 
   vaultPath: "/Users/kywk/kywk/obsidian",   // 絕對路徑，結尾不加斜線
   resourcesPath: "/obsidian",               // app 資源的 URL 前綴（對應 Electron resourcesPath）
   resourcePrefix: "/v/",                    // 供 adapter.getResourcePath 使用
+                                            // ＝ ipcRenderer.sendSync("file-url") 必須回這個值
+                                            //   （不是 resourcesPath！回錯會讓所有附件 URL 變成
+                                            //    /obsidianprivate/var/… 被靜態路由吃掉，DESIGN.md §11.7）
   version: "1.14.4",
   build: "1.14.4",
   platform: "darwin",
@@ -40,7 +43,8 @@ Server 在 HTML 中注入一段同步可用的 JSON，**必須早於任何 shim 
 若用 `TERMS_ACK=1` 這種「存在即同意」的值，renderer 的 `sendSync("terms")` 會拿到 `"1"`，
 比對失敗後呼叫 `window.close()`，症狀是永遠停在載入畫面。
 
-`termsAccepted` 為 false 時，server **不得提供 app.js**，改回一個說明頁。
+`termsAccepted` 為 false 時，server **不得提供 app.js**，且 `GET /` 改回同意頁
+（與 `GET /consent` 同一頁）。
 
 ---
 
@@ -89,9 +93,19 @@ Server 在 HTML 中注入一段同步可用的 JSON，**必須早於任何 shim 
 - 僅允許 vault root 內的路徑，否則 403。
 - 支援 `Range`（回 206 + `Content-Range` + `Accept-Ranges`）、`Last-Modified`、
   `Cache-Control: no-cache`（mtime 已在 query string 上）。
-- `PUT` 供大檔上傳（無條件寫入）。
+- `PUT` 供大檔上傳（無條件寫入）；可選帶 `X-Write-Token` 標頭，帶了就登記到與 `/api/fs`
+  相同的 origin token 表，讓上傳者略過自己的回音事件。`GET`/`HEAD` 不登記（下載不是變更）。
 - URL 形式為 `/v/` + 絕對路徑去掉開頭 `/`，例如
   `/v/Users/kywk/kywk/obsidian/assets/a.png?1730000000000`。
+- 路徑由 `pathToFileURL` **逐段 percent-encode**；Fastify 的 wildcard 參數**已經解碼過一次**，
+  伺服器端**不得再 `decodeURIComponent`**：多解一次會把 `a%20b.png` 當成 `a b.png`，
+  在檔名含 `%XX` 時**靜默回傳錯誤檔案的位元組**（HTTP 200，內容是別人的）。
+- `Range` 三態：未知 unit、多範圍 `a-b,c-d`、`end < start`、非數字 → **忽略並回 200 全文**
+  （不實作 multipart/byteranges）；`start >= size`、`bytes=-0`、空檔案 → 416 +
+  `Content-Range: bytes */<size>`。合法範圍超出 EOF 要夾到 `size-1`。
+- `HEAD` 的 header 與 `GET` 逐欄相同且**無 body**（由 handler 明示，不依賴 Node 丟掉 body）。
+- `.md` / `.markdown` → `text/markdown; charset=utf-8`（否則瀏覽器會下載而不是顯示）；
+  所有 `text/*`、`application/json`、`image/svg+xml`、`application/xml` 一律帶 `; charset=utf-8`。
 
 ---
 
@@ -106,11 +120,18 @@ Server → 客戶端：
 ] }
 ```
 
-- `originToken` 只在事件由本服務的寫入造成時出現；瀏覽器**逐事件**略過 token 等於自己 session token 的事件。
-  這是**逐事件**過濾而非整批略過：伺服器把同一時間窗內所有寫入者的事件聚合成一個批次，
-  整批略過會連外部編輯一起吃掉（實測會讓外部變更永遠不 reconcile）。
-- 伺服器只為同一路徑的第一個事件保留 token（消費後即刪除），因此跨批次的自我寫入仍可能被派發 ——
-  已知破口，記在 `packages/shim/GAPS.md`。
+- `originToken` 的語意是「**這條路徑最近由這個 token 寫過**」，不是「這個事件由這個 token 造成」。
+  瀏覽器**逐事件**略過 token 等於自己 session token 的事件。這是**逐事件**過濾而非整批略過：
+  伺服器把同一時間窗內所有寫入者的事件聚合成一個批次，整批略過會連外部編輯一起吃掉
+  （實測會讓外部變更永遠不 reconcile）。
+- token 在 **TTL（30 s）**內對該路徑的**每一個**事件都保留（不消費即刪除）；這是
+  「自己存檔 → 觸發重載 → plugin 又存檔」迴圈能收斂的唯一條件。代價是 TTL 內同路徑的
+  外部編輯也會被標成自己的（延後一次 reconcile，開檔時仍會回讀磁碟）。
+- 同一路徑被多個 token 寫過時**保留最後一個寫入者**（覆蓋，不合併）：事件只能帶一個 token，
+  且「磁碟現況來自誰的寫入」是唯一有用的答案；保留先寫者會讓後寫的分頁收到自己沒有 token
+  的事件而進入重載迴圈。殘留限制：兩個分頁對同一路徑互相 ping-pong 時彼此都像外部寫入者，
+  單 token 契約無法區分（見 `packages/shim/GAPS.md`）。
+- 註冊表上限 2000 筆路徑，超過時逐出**最久未寫入**者。
 - **事件不是 Node 的粒度**：同一路徑在同一個 150 ms 批次內會被去重（delete 優先）。
   依賴「先 create 再 change」兩個獨立事件的程式會看到合併後的單一事件。
 - 批次聚合視窗 150 ms。
