@@ -12,7 +12,7 @@
     "start": "node src/index.js",
     "test": "node --test test/*.test.mjs"
   },
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "@fastify/websocket": "^11.3.4",
     "chokidar": "^3.6.0",

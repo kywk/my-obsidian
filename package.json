@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "在瀏覽器執行官方 Obsidian renderer，由自架 Node 服務提供 vault 檔案 API",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "engines": {
     "node": ">=22"
   },

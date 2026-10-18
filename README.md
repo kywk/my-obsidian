@@ -192,8 +192,10 @@ Obsidian 不是開源軟體。1.13 之後的 renderer 會在啟動時比對一�
 > **與 Obsidian 無隸屬關係。** 本專案不是 Obsidian 的官方產品，也未獲其背書。
 > Obsidian 是 Dynalist Inc. 的註冊商標；專案名稱僅作描述之用。
 
-本專案的原始碼目前**尚未指定開源授權條款**（© 作者，保留一切權利）。
-若要採用某個授權，請加上 `LICENSE` 後再對外散布。
+本專案的原始碼以 **MIT** 授權釋出（見 [`LICENSE`](LICENSE)，© 2026 Yu Zhi Chen）。
+**MIT 只涵蓋本 repo 的程式碼**：Obsidian renderer 不在本 repo、也不隨本專案散布，
+它由 `npm run vendor` 在你的機器上取得，仍受 Obsidian 自己的條款約束。
+`vendor/` 底下的內容不適用 MIT。
 
 ---
 
