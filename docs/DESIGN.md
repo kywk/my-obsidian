@@ -252,3 +252,56 @@ Obsidian 用 `yE("/lib/...")` 懶載入這些重函式庫，清單為：
 
 （同類的還有 `new Worker("worker.js")` 與 `new Worker("/sim.js")`，已由 `boot-data.js` 重寫為 `/obsidian/` 前綴。）
 
+### 11.3 `policy` 不可為空 —— 否則所有社群 plugin 靜默不載入
+
+renderer 的 boot 流程：
+
+```js
+var Hx = { plugins:!0, themes:!0, snippets:!0, sync:!0, publish:!0, webViewer:!0, devTools:!0, insider:!0 }, zx=!1;
+function (e) { zx || (Hx = Object.freeze(e), zx = !0) }(ipcRenderer.sendSync("policy"));
+function Vx(e, t) { return !0 === e || Array.isArray(e) && e.includes(t) }
+```
+
+`Vx` 是 `policyAllows`，`PluginManager.enablePlugin()` 第一行就呼叫它。
+送出 `{}` 會**無條件覆蓋**那份寬鬆預設，於是 `Hx.plugins` 是 `undefined` → `policyAllows(undefined, id)` 回 `false`
+→ 社群 plugin、主題、snippet 全部不載入，**沒有任何錯誤或日誌**。
+
+伺服器因此注入 `DEFAULT_POLICY`，其值逐欄等於桌面版 main process 的正常建置預設（`Bt`）。
+
+> 這個 bug 是實作熱重載時發現的：測試用的 probe plugin 一直不載入，追下去才看到 `enablePlugin` 被 policy 擋掉。
+> 它會讓「MVP 支援 plugin」這條需求完全失效，而且症狀是靜默的。
+
+### 11.4 `util` 等 Node 內建模組的缺口（已修）
+
+`require-shim.js` 原本的可提供清單是 `electron, fs, original-fs, path, os, url, crypto, btime, process`，
+少了 `DESIGN.md` §7 白名單裡的 `util`、`buffer`、`querystring`。
+實測 `templater-obsidian` 的 `onload` 會因 `require("util")` 失敗而中斷。
+
+已補上 `node-globals-shim.js`（同時處理 §11.5）。可提供清單改為由 registry 推導，
+錯誤訊息不再可能過時。
+
+### 11.5 瀏覽器缺少 Node 全域 —— 文字路徑正常，二進位路徑全壞
+
+`app.js` 本體直接引用裸 `Buffer` **184 次**，包含 `Buffer.from`（`toArrayBuffer`，所有二進位讀寫都會用到）、
+`Buffer.concat`、`Buffer.alloc`、`Buffer.isView`。Electron 有這些全域，瀏覽器沒有：
+
+```
+Buffer: "undefined"   global: "undefined"   setImmediate: "undefined"
+```
+
+**症狀是靜默的**：文字編輯、metadata cache、plugin 載入全部正常，只有附件（圖片／PDF／音訊）的
+讀寫路徑會拋 `Buffer is not defined`。第一次 spike 只驗文字往返，所以完全沒看到 ——
+是後來在 `spike-check.mjs` 加入二進位往返斷言才暴露：
+
+```
+binaryRoundTrip: false   →   加入 node-globals-shim.js 後   →   binaryRoundTrip: true
+```
+
+> 教訓：驗收條件只覆蓋文字路徑，等於沒覆蓋附件。`spike-check.mjs` 現在把二進位往返列為必要條件。
+
+### 11.6 L2 覆蓋率（實測基準）
+
+對 `~/kywk/obsidian` 的 16 個已啟用 plugin：**載入 14 個**。
+唯二未載入的是 `vault-feed-reader` 與 `geo-story-map`，兩者都 `require("node:child_process")` ——
+這是 `DESIGN.md` §7 明定的 L2 邊界，不是缺陷。
+

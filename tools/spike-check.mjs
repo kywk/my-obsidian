@@ -15,14 +15,16 @@
  * printed. See AGENTS.md hard rule 3.
  */
 
-import { spawn } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
-const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+import {
+  Cdp,
+  launchChrome,
+  readTermsFromVendor,
+  sleep,
+  startServer,
+} from './lib/cdp.mjs';
 
 // ---------------------------------------------------------------- arguments
 
@@ -38,166 +40,6 @@ function parseArgs(argv) {
     else if (a === '--log') out.log = argv[++i];
   }
   return out;
-}
-
-// ------------------------------------------------------------------- helper
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function waitForHttp(url, deadlineMs) {
-  const deadline = Date.now() + deadlineMs;
-  let lastErr;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url);
-      if (res.ok) return true;
-      lastErr = new Error(`HTTP ${res.status}`);
-    } catch (err) {
-      lastErr = err;
-    }
-    await sleep(150);
-  }
-  throw new Error(`server did not become ready at ${url}: ${lastErr?.message}`);
-}
-
-/**
- * Pull the acknowledgement literal out of the shipped bundle. It is compared
- * against sendSync("terms") immediately before window.close(); the string sits
- * on the left of that comparison.
- */
-function readTermsFromVendor() {
-  const p = path.join(REPO_ROOT, 'vendor/obsidian/app.js');
-  const src = fs.readFileSync(p, 'utf8');
-  const marker = '.ipcRenderer.sendSync("terms")';
-  const at = src.indexOf(marker);
-  if (at < 0) throw new Error('terms gate not found in vendor/obsidian/app.js');
-  const open = src.lastIndexOf('"', at - 2);
-  const close = src.lastIndexOf('"', open - 1);
-  const value = src.slice(close + 1, open);
-  if (!value || value.length < 40) {
-    throw new Error('extracted terms literal looks wrong; refusing to continue');
-  }
-  return value;
-}
-
-async function startServer(vault, port, terms) {
-  const child = spawn(process.execPath, ['src/index.js'], {
-    cwd: path.join(REPO_ROOT, 'packages/server'),
-    env: {
-      ...process.env,
-      VAULT_PATH: vault,
-      PORT: String(port),
-      HOST: '127.0.0.1',
-      TERMS_ACK: terms,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const logs = [];
-  child.stdout.on('data', (d) => logs.push(String(d)));
-  child.stderr.on('data', (d) => logs.push(String(d)));
-  child.on('exit', (code) => logs.push(`[server exited ${code}]`));
-  await waitForHttp(`http://127.0.0.1:${port}/`, 20000);
-  return { child, logs };
-}
-
-// -------------------------------------------------------------------- CDP
-
-class Cdp {
-  /** @param {string} wsUrl */
-  constructor(wsUrl) {
-    this.wsUrl = wsUrl;
-    this.nextId = 1;
-    this.pending = new Map();
-    this.listeners = new Set();
-  }
-
-  async connect() {
-    this.ws = new WebSocket(this.wsUrl);
-    await new Promise((resolve, reject) => {
-      this.ws.addEventListener('open', resolve, { once: true });
-      this.ws.addEventListener('error', () => reject(new Error('ws error')), {
-        once: true,
-      });
-    });
-    this.ws.addEventListener('message', (event) => {
-      let msg;
-      try {
-        msg = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-      if (msg.id && this.pending.has(msg.id)) {
-        const { resolve, reject } = this.pending.get(msg.id);
-        this.pending.delete(msg.id);
-        if (msg.error) reject(new Error(JSON.stringify(msg.error)));
-        else resolve(msg.result);
-        return;
-      }
-      for (const fn of this.listeners) fn(msg);
-    });
-  }
-
-  on(fn) {
-    this.listeners.add(fn);
-  }
-
-  send(method, params = {}, sessionId) {
-    const id = this.nextId++;
-    const payload = { id, method, params };
-    if (sessionId) payload.sessionId = sessionId;
-    this.ws.send(JSON.stringify(payload));
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      setTimeout(() => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id);
-          reject(new Error(`CDP timeout: ${method}`));
-        }
-      }, 30000);
-    });
-  }
-
-  close() {
-    try {
-      this.ws.close();
-    } catch {
-      // already closed
-    }
-  }
-}
-
-async function launchChrome(port) {
-  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'myobs-chrome-'));
-  const child = spawn(
-    CHROME,
-    [
-      '--headless=new',
-      `--remote-debugging-port=${port}`,
-      `--user-data-dir=${userDataDir}`,
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--disable-gpu',
-      '--disable-background-timer-throttling',
-      '--disable-renderer-backgrounding',
-      '--window-size=1440,900',
-      'about:blank',
-    ],
-    { stdio: ['ignore', 'ignore', 'ignore'] },
-  );
-  const deadline = Date.now() + 20000;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/json/version`);
-      if (res.ok) {
-        const info = await res.json();
-        return { child, userDataDir, wsUrl: info.webSocketDebuggerUrl };
-      }
-    } catch {
-      // not up yet
-    }
-    await sleep(150);
-  }
-  throw new Error('Chrome did not expose a debugging endpoint');
 }
 
 // ------------------------------------------------------------------- main
@@ -402,7 +244,24 @@ async function main() {
       report.facts.writeTarget = writeResult?.why ?? 'unknown';
     }
 
-    // 5. cold start budget
+    // 5. binary round-trip. Text writes go through a different adapter path than
+    // binary ones, and the binary path is where the renderer's bare-Buffer
+    // references live (`Buffer.from`, `Buffer.concat`, ...). Without them the
+    // whole attachment pipeline is broken and text-only testing hides it.
+    const binaryResult = await evaluate(`(async () => {
+      const name = 'myobs-spike-binary.bin';
+      const bytes = new Uint8Array([0, 1, 2, 253, 254, 255, 65, 66, 67]);
+      await app.vault.adapter.writeBinary(name, bytes.buffer);
+      const back = await app.vault.adapter.readBinary(name);
+      const view = new Uint8Array(back);
+      const same = view.length === bytes.length && view.every((b, i) => b === bytes[i]);
+      await app.vault.adapter.remove(name);
+      return { ok: true, same, length: view.length };
+    })()`).catch((err) => ({ ok: false, why: String(err.message || err) }));
+    report.criteria.binaryRoundTrip = binaryResult?.same === true;
+    report.facts.binaryRoundTrip = binaryResult;
+
+    // 6. cold start budget
     report.criteria.coldStartUnder5s = report.timings.coldStartMs < 5000;
 
     // 6. workspace isolation. The vault copy already carries workspace.json
@@ -421,6 +280,11 @@ async function main() {
     report.criteria.noExceptions = report.console.exceptions.length === 0;
 
     report.facts.vaultName = await evaluate('app.vault.getName()').catch(() => null);
+    // Node globals the renderer references 184 times; if Buffer is missing, every
+    // binary path throws "Buffer is not defined" and only the text path works.
+    report.facts.nodeGlobals = await evaluate(
+      'JSON.stringify({Buffer: typeof Buffer, process: typeof process, global: typeof global, setImmediate: typeof setImmediate})',
+    ).catch(() => null);
     report.facts.fetchCount = await evaluate('window.__myobsCount').catch(() => null);
     report.facts.fetchFails = await evaluate(
       'JSON.stringify((window.__myobsFails || []).slice(0, 8))',

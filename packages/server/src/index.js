@@ -128,6 +128,34 @@ async function detectObsidianVersion(vendorDir) {
  * @param {string} [options.build]
  * @returns {Promise<object>}
  */
+/**
+ * Managed-policy defaults.
+ *
+ * The renderer does `policy = Object.freeze(ipcRenderer.sendSync("policy"))`,
+ * unconditionally REPLACING its own permissive default, and then gates every
+ * community plugin, theme and snippet behind `policyAllows(policy.plugins, id)`.
+ * Sending `{}` therefore disables all community plugins silently -- no error,
+ * no log, the plugin simply never loads (found by the hot-reload workstream;
+ * see docs/DESIGN.md §11.3).
+ *
+ * These values are byte-for-byte the desktop main process's own normal-build
+ * default (`Bt` in app.asar/main.js), so we reproduce shipped behaviour rather
+ * than inventing a policy.
+ *
+ * @type {{ plugins: boolean, themes: boolean, snippets: boolean, sync: boolean,
+ *         publish: boolean, webViewer: boolean, devTools: boolean, insider: boolean }}
+ */
+export const DEFAULT_POLICY = Object.freeze({
+  plugins: true,
+  themes: true,
+  snippets: true,
+  sync: true,
+  publish: true,
+  webViewer: true,
+  devTools: true,
+  insider: true,
+});
+
 export async function buildBootInfo(options) {
   const { vaultPath, termsAccepted } = options;
   const vendorDir = options.vendorDir ?? DEFAULT_VENDOR_DIR;
@@ -150,7 +178,7 @@ export async function buildBootInfo(options) {
     arch: process.arch,
     documentsDir: path.join(os.homedir(), 'Documents'),
     desktopDir: path.join(os.homedir(), 'Desktop'),
-    policy: {},
+    policy: options.policy ?? DEFAULT_POLICY,
     termsAccepted,
     devMode: process.env.DEV_MODE === '1',
   };

@@ -274,6 +274,26 @@ export function registerStaticRoutes(app, options) {
     ),
   );
 
+  // The runtime layer next to index.html (plugin-watch.js today). index.html
+  // itself is served through "/" so the boot object can be injected; this route
+  // is plain static files and must not duplicate the injection logic.
+  // The root is derived from runtimeIndexPath rather than configured twice, so
+  // the two cannot drift apart.
+  const runtimeDir = path.dirname(path.resolve(runtimeIndexPath));
+  app.get(
+    '/runtime/*',
+    assetTree(
+      runtimeDir,
+      (rel) =>
+        [
+          `runtime script not found: /runtime/${rel}`,
+          `expected under: ${runtimeDir}`,
+          'the runtime layer lives in packages/runtime and is not generated.',
+        ].join('\n'),
+      { cacheControl: 'no-store' },
+    ),
+  );
+
   // Browsers request /favicon.ico unconditionally; serve Obsidian's own icon
   // rather than logging a 404 on every load.
   app.get('/favicon.ico', async (request, reply) => {

@@ -149,6 +149,51 @@
 	window.__MYOBS_BOOT_OK = true;
 
 	/*
+	 * Per-session write token. fs-shim stamps it onto every mutation and
+	 * watch-shim drops WS events that carry it back (CONTRACTS.md §4), which is
+	 * what stops "our save -> reload -> plugin saves data.json -> reload" from
+	 * becoming a loop.
+	 *
+	 * The server does not inject one today, but if it ever does its value must
+	 * win: a tab-scoped token generated here would not match a token the server
+	 * had already associated with this session.
+	 */
+	(function ensureSessionToken() {
+		var boot = window.__MYOBS;
+		if (!boot || typeof boot !== "object") return;
+		if (typeof boot.sessionToken === "string" && boot.sessionToken !== "") return;
+
+		function bytesToHex(value) {
+			var out = "";
+			for (var i = 0; i < value.length; i++) {
+				out += (value[i] < 16 ? "0" : "") + value[i].toString(16);
+			}
+			return out;
+		}
+
+		var token = "";
+		try {
+			if (window.crypto && typeof window.crypto.randomUUID === "function") {
+				token = window.crypto.randomUUID();
+			} else if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+				var bytes = new Uint8Array(16);
+				window.crypto.getRandomValues(bytes);
+				token = bytesToHex(bytes);
+			}
+		} catch (err) {
+			/* randomUUID can throw outside a secure context; fall through */
+		}
+
+		if (!token) {
+			// Last resort only: still unique per tab, but not cryptographically
+			// random. It is an echo marker, not an authorization credential.
+			token = "myobs-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+		}
+
+		boot.sessionToken = token;
+	})();
+
+	/*
 	 * The shipped renderer creates these workers with paths relative to the
 	 * document URL (or, for the graph worker, with a root-absolute path):
 	 *

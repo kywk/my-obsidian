@@ -22,11 +22,21 @@
       詳見 `docs/DESIGN.md` §10、§11
 - [x] **修正：傳輸層併發上限** — `fs-shim.js` 加 48 併發上限（原因見 `DESIGN.md` §11.1）
 - [x] **修正：`/lib/*` alias** — Mermaid/PDF/Prism/MathJax/Slides（原因見 `DESIGN.md` §11.2）
-- [ ] **shim 缺口清單** — 彙整 `packages/shim/GAPS.md`（8 節）與兩個實作 agent 回報的未知
-- [x] **契約歧義修正** — `termsText` 已補進 `CONTRACTS.md` §1；`stat.realpath` 已註明絕對路徑
-- [ ] **未走到的路徑待補測** — `resourcePathPrefix` 產生的 `/v/*` 在 spike 中 0 次請求
+- [x] **shim 缺口清單** — `packages/shim/GAPS.md`（8 節）＋ spike 與熱重載兩輪的發現
+- [x] **契約歧義修正** — `termsText`、`policy`、`stat.realpath`、逐事件過濾都已回寫 `CONTRACTS.md`
+- [x] **熱重載** — `watch-shim.js`（WS ↔ adapter `fs.watch`）、`plugin-watch.js`（plugin unload→load）
+      驗收：`tools/hotreload-check.mjs` 4/4 通過（WS 連線、筆記外部變更、plugin 熱重載、回音過濾）
+- [x] **修正：`policy: {}` 導致所有社群 plugin 靜默不載入** — 見 `DESIGN.md` §11.3
+- [x] **修正：缺少 Node 全域 `Buffer`/`global`/`setImmediate`** — 見 `DESIGN.md` §11.5，
+      `spike-check.mjs` 加入二進位往返為必要條件
+- [x] **修正：`util`/`buffer`/`querystring` 未提供** — 見 `DESIGN.md` §11.4
+- [x] **L2 覆蓋率基準** — 16 個已啟用 plugin 載入 14 個；`vault-feed-reader`、`geo-story-map`
+      因 `node:child_process` 未載入（設計上的邊界，見 `DESIGN.md` §11.6）
+- [ ] **`terms` 同意畫面** — server config 持久化 + UI（目前只有 `TERMS_ACK` 環境變數）
+- [ ] **未走到的路徑待補測** — `resourcePathPrefix` 產生的 `/v/*` 在兩輪 spike 中都是 0 次請求
       （沒有渲染任何含圖片的筆記）。圖片／影片／PDF 的 Range 與 URL 對應仍未實測。
-- [ ] **`GAPS.md` 內 17 條未實作項** — 逐條決策：補實作或標為永久限制
+- [ ] **回音過濾的跨批次破口** — 伺服器只為同一路徑的第一個事件保留 token（見 `CONTRACTS.md` §4）
+- [ ] **`GAPS.md` 內未實作項** — 逐條決策：補實作或標為永久限制
 
 ---
 

@@ -21,12 +21,20 @@ Server 在 HTML 中注入一段同步可用的 JSON，**必須早於任何 shim 
   arch: "arm64",
   documentsDir: "/Users/kywk/Documents",
   desktopDir: "/Users/kywk/Desktop",
-  policy: {},
+  policy: {
+    plugins: true, themes: true, snippets: true, sync: true,
+    publish: true, webViewer: true, devTools: true, insider: true
+  },
   termsAccepted: true,
   termsText: "<操作者本人確認後提供的聲明字串；未提供時為空字串>",
   devMode: false
 }</script>
 ```
+
+`policy` **不可以是空物件**。renderer 會 `Object.freeze(sendSync("policy"))` 無條件覆蓋自己的寬鬆預設值，
+之後每個社群 plugin／主題／snippet 都必須通過 `policyAllows(policy.plugins, id)`。
+送 `{}` 的結果是**所有社群 plugin 靜默不載入**（沒有錯誤、沒有日誌）。上面的值是桌面版 main process
+自己的正常建置預設，逐欄相同。詳見 `DESIGN.md` §11.3。
 
 `termsAccepted` / `termsText` 的關係：`termsAccepted` 必須由「`termsText` 非空」推導，而不是由任何布林旗標推導。
 若用 `TERMS_ACK=1` 這種「存在即同意」的值，renderer 的 `sendSync("terms")` 會拿到 `"1"`，
@@ -98,7 +106,13 @@ Server → 客戶端：
 ] }
 ```
 
-- `originToken` 只在事件由本服務的寫入造成時出現；瀏覽器略過 token 等於自己最後送出者的事件。
+- `originToken` 只在事件由本服務的寫入造成時出現；瀏覽器**逐事件**略過 token 等於自己 session token 的事件。
+  這是**逐事件**過濾而非整批略過：伺服器把同一時間窗內所有寫入者的事件聚合成一個批次，
+  整批略過會連外部編輯一起吃掉（實測會讓外部變更永遠不 reconcile）。
+- 伺服器只為同一路徑的第一個事件保留 token（消費後即刪除），因此跨批次的自我寫入仍可能被派發 ——
+  已知破口，記在 `packages/shim/GAPS.md`。
+- **事件不是 Node 的粒度**：同一路徑在同一個 150 ms 批次內會被去重（delete 優先）。
+  依賴「先 create 再 change」兩個獨立事件的程式會看到合併後的單一事件。
 - 批次聚合視窗 150 ms。
 - chokidar 設定：`ignoreInitial: true`、`awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 100 }`。
 - 忽略清單：`.git/`、`.docusaurus/`、`node_modules/`，以及 `.obsidian/workspace.json`。

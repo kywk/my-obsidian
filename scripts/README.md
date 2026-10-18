@@ -54,3 +54,17 @@ JSON 樹的 leaf 形狀：
 - manifest 的 `sourceSha256` 與來源相同，且輸出 `app.js` 大小等於 asar header 記載的大小時，直接輸出 `up to date` 並結束（`--force` 可強制重解）。
 - 解包先寫到 `vendor/.obsidian-tmp-*`，完成後才與舊目錄交換；失敗會清掉暫存目錄，不會留下半套檔案。
 - `skipped` 固定記錄 `["node_modules"]`。目前 1.14.4 的 asar 內沒有這個目錄，所以 `fileCount` 不受影響。
+
+## 不要用 `@electron/asar extract-file`
+
+`npx @electron/asar extract-file <asar> <path>` **不會把內容寫到 stdout**，而是把解出的檔案
+寫進**當前工作目錄**。實際踩到的後果：
+
+1. 在 `Contents/Resources/` 底下解 `obsidian.asar` 的檔案 → 六個鬆散檔案落進 app bundle，
+   直接讓 `codesign --verify` 變成 `a sealed resource is missing or invalid`。
+2. 在 repo 根目錄解 `main.js` → 官方專有程式碼出現在版控範圍內。
+
+`scripts/fetch-obsidian.mjs` 自己實作 ASAR 讀取器就是為了避免這件事：零外部依賴、
+輸出目錄強制限制在 `vendor/` 之下、而且用每個 entry 內建的 sha256 驗證。
+**要解 asar 就用它。** 若真的需要一次性檢視某個檔案，用 `fetch-obsidian.mjs` 解到 `vendor/`
+再讀，或寫一段 `node -e` 自行讀 offset。

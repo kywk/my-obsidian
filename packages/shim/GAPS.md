@@ -49,11 +49,11 @@
 | `fs-shim.js`（`writeFileSync` / `unlinkSync`） | 佇列化 fire-and-forget，立即回傳；錯誤只寫 console。 | 真正的同步 API；目前在後續非同步操作前不保證已完成，且不會丟錯。 |
 | `fs-shim.js`（`statSync` / `lstatSync`） | 只讀快取，回傳 size 0、mtime = now 的假 stats；未快取丟 `ENOENT`。 | 真正的同步 stat。外掛（如 externalfile manager）會因此看不到檔案。 |
 | `fs-shim.js`（`readFileSync`） | 只支援 `__MYOBS.resourcesPath`（`/obsidian/*`）的靜態資源，且用 sync XHR；vault 路徑丟 `ENOTSUP`。 | Node 可同步讀任何路徑；目前 i18n dev 檔、自訂 icon 等同步讀取會失敗。 |
-| `fs-shim.js`（`watch`） | 回傳 no-op watcher（有 `on/close` 介面但永不觸發）。 | 真正的檔案監控。外部變更必須由 server 的 `/api/watch` WebSocket 接到 adapter 的 `onFileChange`，這條線目前尚未接上。 |
+| `fs-shim.js`（`watch`） | 委派 `window.__MYOBS_WATCH.watch()`（watch-shim）——**呼叫時**才判斷，因為 fs-shim 先載入；watch-shim 不存在時維持 no-op watcher。 | Node 的 `fs.watch` 在程序內直接產生事件；這裡的事件來自 server 的 `/api/watch`（單一來源、150ms 批次、`awaitWriteFinish` 300ms），延遲與粒度都不同。見 §3b。 |
 | `fs-shim.js`（`lstat` / symlink） | 直接轉呼 `stat`；server 的 `stat` 會 follow symlink，`isSymbolicLink()` 永遠 `false`。 | 需要 server 端 lstat op；目前 symlink 會被當成檔案/資料夾，且不會走 Obsidian 的 `reconcileSymbolicLinkCreation`。 |
 | `fs-shim.js`（`stat.realpath`） | 直接透傳 server `stat` 回的 `realpath`；目前 `packages/server/src/fs-api.js` 回的是**絕對、已解析 symlink** 路徑。adapter 不讀此欄位。 | Node 的 stat 沒有 `realpath` 欄位；契約 §2 對此描述模糊。外掛若要一致請改讀 `fs.promises.realpath()`。 |
 | `fs-shim.js`（`readFile`） | 未指定 encoding 時回 `Uint8Array`（不是 Node `Buffer`）。 | Node 回 `Buffer`；外掛若直接呼叫 `.toString("utf8")` 等方法會失敗，需傳 encoding。 |
-| `fs-shim.js`（`writeFile`） | `ifMtimeMs` / `token` 只有呼叫端自己放在 options 才會轉發；Obsidian adapter 並不傳。conflict copy 只記錄在 `window.__MYOBS_LAST_CONFLICT` 與 console。 | 應在 UI 提示 conflict（`DESIGN.md` §5）；目前 `conflictSavedAs` 不會被使用者看到。 |
+| `fs-shim.js`（`writeFile`） | `ifMtimeMs` 仍只有呼叫端自己放在 options 才會轉發（Obsidian adapter 並不傳）；`token` 由傳輸層 `api()` 依 `TOKEN_OPS` 自動補上（見 §3b）。conflict copy 只記錄在 `window.__MYOBS_LAST_CONFLICT` 與 console。 | 應在 UI 提示 conflict（`DESIGN.md` §5）；目前 `conflictSavedAs` 不會被使用者看到。 |
 | `fs-shim.js`（`access`） | 忽略 mode（R_OK/W_OK/X_OK 都視為存在性檢查）。 | 需尊重 mode；唯讀資源也應區分 `EACCES`。 |
 | `fs-shim.js`（`mkdir`） | 一律走 server 的遞迴 mkdir；`recursive: false` 不生效。 | 非遞迴時 parent 不存在應丟 `ENOENT`。 |
 | `fs-shim.js`（`rm` / `rmdir`） | `rm` 在 `recursive:true` 時送 `rmdir {recursive:true}`，否則送 `remove`（server 對資料夾回 `EISDIR`，與 Node 一致）；`maxRetries`/`retryDelay` 忽略。 | `maxRetries` 等重試語意仍未實作；`force` 只吞 `ENOENT`。 |
@@ -68,6 +68,32 @@
 | `fs-shim.js`（缺的 promises） | 沒有 `opendir`、`readlink`、`symlink`、`link`、`chmod`、`chown`、`mkdtemp`、`cp`、`statfs`、`watch`。 | 完整 Node fs.promises 介面。 |
 | `fs-shim.js`（`constants`） | 只提供 `COPYFILE_*`、`O_*`、`S_IF*` 等基本常數。 | 完整 `fs.constants`。目前 adapter 只用到 `COPYFILE_EXCL`。 |
 | `fs-shim.js`（`realpath`） | vault 路徑回 `vaultRoot + 相對路徑` 的絕對字串；server 端 op 本身回相對路徑。 | Node 語意是解析 symlink 後的絕對路徑；目前不解析 symlink。 |
+
+## 3b. `watch-shim.js` / `plugin-watch.js`（外部變更與熱重載）
+
+`fs.watch` 由 `watch-shim.js` 接上 server 的 `/api/watch` WebSocket，`plugin-watch.js`
+再依原始事件重載 `.obsidian/plugins/*`。下列都是與 Node `fs.watch` 或 desktop Obsidian 的已知落差。
+
+`__MYOBS_WATCH.state` 的計數語意（測試斷言用）：`received` 收到的事件總數；
+`dispatched` 實際派發出去的次數（事件 × 命中的 watcher 數）；`filtered` 被回音過濾略過的事件數；
+`reconnects` 第二次以後的成功連線次數（首次連線不計）。
+
+| 位置 | 目前行為 | 正確行為 |
+|---|---|---|
+| `fs-shim.js`（`api()` 的 `TOKEN_OPS`） | 所有變更類 op（`write`/`writeBinary`/`append`/`appendBinary`/`mkdir`/`rmdir`/`remove`/`rename`/`copy`/`utimes`）在傳輸層自動補 `token: __MYOBS.sessionToken`，呼叫端不需知道。讀取類 op 不補。 | 契約 §2 的 `token` 本來就是給回音過濾用的；這一層是唯一能涵蓋所有呼叫端（adapter、外掛、`writeFileSync` 佇列）的位置。 |
+| `boot-data.js`（`sessionToken`） | 每個 document 一組 token（`crypto.randomUUID()`，退回 `getRandomValues` 十六進位，最後才用 `Math.random`）；**不覆蓋** server 已注入的值。 | 多分頁各自一組是正確的：**同一分頁**的寫入才會被自己過濾掉。分頁 A 的寫入在分頁 B 仍會派發（B 需要 reconcile）。 |
+| `watch-shim.js`（事件過濾） | 以**事件**為單位略過 `originToken === sessionToken` 者，並略過同批同路徑的兄弟事件。 | 一開始是「整批略過」，但 server 會把**所有寫入者**聚合成同一個 150ms 批次，整批略過連同批的外部編輯一起吃掉（`tools/hotreload-check.mjs` 的筆記測試就是這樣失敗的）。逐事件過濾同樣能阻斷迴圈，且不會犧牲外部變更。 |
+| `watch-shim.js`（token 只覆蓋第一個事件） | server 的 `consumeOriginToken()` 對同一路徑只發一次 token；若同一路徑在**不同批次**又產生事件（例如新檔的 add 與後續 change），第二個事件沒有 token → 會被派發。 | 需要 server 端把 token 保留到路徑穩定（或改成 TTL 內都帶 token）。目前的破口只在「同一路徑跨批次」才會出現。 |
+| `watch-shim.js`（事件粒度與順序） | 只保證第 N 批在 O(150ms)；同一路徑在同一批只會有一個事件（server 的 `pending` Map 去重，`delete` 優先），同一批內的多個路徑**沒有先後語意**。 | Node 的 `fs.watch` 依序回報每一次變更。依賴「先 create 再 change」的外掛會看到合併後的事件。 |
+| `watch-shim.js`（`error` 事件） | 永不派發 `error`。Node 的 FSWatcher 失效時會丟 `error`，adapter 收到後會 `onFileChange(realpath)` 全庫 rescan。這裡若在每次 WS 斷線都派發，會變成反覆全庫掃描。 | 需要「重連後補償」的策略（見下一列）。 |
+| `watch-shim.js`（重連） | 指數退避 1s → 上限 15s；`state.reconnects` 只在第二次以後的連線累加。**不重播**錯過的批次。斷線期間的外部變更若之後沒有再次變動，永遠不會傳到瀏覽器。 | 應在重連後對 `.obsidian/plugins/*` 與開檔中的檔案補一次 mtime 掃描，或由 server 保存最近 N 秒的事件重播。 |
+| `watch-shim.js`（watcher 根） | 只服務落在 `__MYOBS.vaultPath` 內的 watcher 根；其他根會警告一次且永不派發。 | Obsidian 目前只註冊 vault root 與 `.obsidian` 子樹，都在 vault 內。 |
+| `watch-shim.js`（目錄本身的事件） | `event.path === watcher.rel`（watched 目錄自己改變）時略過。 | Node 會回目錄的 basename，adapter 會把它當成「watcher 根下的項目」；略過可避免對 vault root 做無意義的 `reconcileFile("")`。 |
+| `plugin-watch.js`（路徑） | 只認 `.obsidian/plugins/<id>/{main.js,manifest.json,styles.css,data.json}`。自訂 config dir、plugin 子目錄、其他檔案（例如 plugin 自帶的 `.css`）不觸發。 | Obsidian 支援自訂 configDir；`DESIGN.md` §4 只列出這四種檔案。 |
+| `plugin-watch.js`（data.json 延後） | 設定頁開著時用 `document.querySelector(".mod-settings") !== null` 判斷，500ms 輪詢、30 秒後放棄並記錄 `deferred-abandoned`。 | 沒有公開 API 可查「目前開啟的 settings tab」；DOM class 是唯一可行訊號，Obsidian 改版可能失效。 |
+| `plugin-watch.js`（重載失敗） | `enablePlugin(id)` 回 `false`（例如 `policy.plugins` 不允許社群外掛）時，外掛會停在 unloaded，只有 `__MYOBS_PLUGIN_WATCH.events` 記錄失敗。 | 依 `DESIGN.md` §4 應該重載；失敗時應有 UI 提示。目前刻意不吞例外、完整記錄。 |
+| `plugin-watch.js`（開關） | `enabled` 預設 true，可由 `localStorage.getItem("myobs-plugin-watch") === "off"` 關閉（只在載入時讀一次）。`reloadAll()` 存在但尚無 UI。 | `DESIGN.md` §4 要求 UI 開關與手動「重新載入所有 plugin」；設定介面尚未實作。 |
+| `plugin-watch.js`（時序） | 重載鏈為 WS(≤150ms) → watch-shim → per-plugin debounce 400ms → unload/load。外部 `main.js` 變更到外掛重新 `onload` 約 1 秒。 | 桌面版是 OS 事件（毫秒級）。這是取樣與聚合的成本，屬可接受的近似。 |
 
 ## 4. `path` / `os` / `url`
 
@@ -106,7 +132,7 @@
 
 | 位置 | 目前行為 | 正確行為 |
 |---|---|---|
-| `index.html` | Shim 以 `/shim/*` 載入、Obsidian 資產以 `/obsidian/*` 載入。截至目前 `packages/server/src/static.js` 只註冊 `/obsidian/*` 與 `/`，**沒有 `/shim/*` 路由**，因此十個 shim 會 404；必須由 server 補上（服務 `packages/shim/src`），或在契約中另訂 shim 路徑。 | 兩個靜態路由都必須存在；若改路徑需同步修改 `index.html` 與 boot-data 的 worker resolver。 |
+| `index.html` | Shim 以 `/shim/*` 載入、Obsidian 資產以 `/obsidian/*` 載入、runtime 層（`plugin-watch.js`）以 `/runtime/*` 載入；三者都由 `packages/server/src/static.js` 的 `assetTree()` 提供（`no-store`，改檔立即生效）。 | 已對齊；若改路徑需同步修改 `index.html` 與 boot-data 的 worker resolver。`/runtime/*` 的 root 由 `runtimeIndexPath` 的 dirname 推導，避免與 `/` 的注入來源分岔。 |
 | `boot-data.js`（Worker resolver） | 只改寫 `worker.js`、`/worker.js`、`sim.js`、`/sim.js` 四種寫法到 `resourcesPath`。 | 外掛以相對 URL 建立的 worker 仍以 document URL 為基準；若 runtime 頁面不在 `/obsidian/`，外掛需自己用絕對路徑。 |
 | `index.html` | 沒有 PWA manifest / service worker。 | `DESIGN.md` §3 第 13 項的行動版需求尚未實作。 |
 | `index.html` | fatal overlay 以 inline style/script 實作，CSP 只限制 `style-src`。 | 若 server 之後加上 `script-src` CSP，inline script 會被擋掉，需改為外部檔案或 nonce。 |
@@ -119,4 +145,5 @@
 | `resourcesPath` 是 URL 前綴 | fs shim 只認字串前綴 `/obsidian`，不認磁碟上的 `Contents/Resources`。 | 若 renderer 以 `original-fs` 讀真正的 Electron 資源磁碟路徑，會 `ENOENT`。 |
 | `stat.realpath` | Server `stat` 回絕對、已解析 symlink 的 `realpath`；shim 直接透傳。`fs.promises.realpath()` 走獨立的 `realpath` op（server 回 vault 相對路徑，shim 再接成絕對）。 | 契約 §2 對 `stat.realpath` 的相對/絕對沒有明說；server 與 shim 目前一致，但需要寫進契約。 |
 | `write.conflictSavedAs` | shim 有轉發，但 Obsidian adapter 沒把結果傳到 UI。 | 需要獨立的 server→client 通知或 `__MYOBS_LAST_CONFLICT` 的 UI 消費端。 |
-| `/api/watch` WebSocket | shim 尚未把 WS 事件接進 adapter 的 `onFileChange`。 | fs.watch 目前 no-op；外部變更的熱重載要靠這條線（`DESIGN.md` §4）。 |
+| `/api/watch` WebSocket | shim 已接上：`watch-shim.js` 把 WS 事件轉成 adapter 的 `fs.watch` 事件（見 §3b），`plugin-watch.js` 負責 plugin 熱重載。 | 事件粒度、回音過濾與重連補償的落差都列在 §3b。 |
+| `__MYOBS.policy` 注入 | `CONTRACTS.md` §1 的範例是 `policy: {}`，但 renderer 會 `Hx = Object.freeze(sendSync("policy"))` 並用它當功能閘：`PluginManager.enablePlugin()` 第一行就是 `Vx(Hx.plugins, id)`，空物件 → `undefined` → **每個社群外掛、主題、snippet 都載不進來**（`app.plugins.plugins` 永遠是空的，且沒有任何錯誤訊息）。`tools/hotreload-check.mjs` 因此在測試頁面注入 `policy.plugins = true` 才驗得動熱重載。 | `packages/server/src/index.js` 的 `buildBootInfo()` 應注入真實 policy：至少 `{ plugins: true, themes: true, snippets: true }`；`sync`/`publish`/`webViewer`/`devTools`/`insider` 依 `DESIGN.md` §3 第 5 項可為 `false`。shim 不動此欄位（契約屬 server 端）。 |

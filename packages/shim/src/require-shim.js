@@ -11,7 +11,12 @@
 
 	var modules = window.__MYOBS_MODULES || (window.__MYOBS_MODULES = {});
 
-	var SUPPORTED = ["electron", "fs", "original-fs", "path", "os", "url", "crypto", "btime", "process"];
+	// Derived from the registry rather than hard-coded: the error messages below
+	// are the only place a plugin author learns what this runtime offers, and a
+	// stale list there is worse than no list.
+	function supportedNames() {
+		return Object.keys(modules).sort();
+	}
 
 	// Modules that would require server-side execution rights. These get a
 	// dedicated message because Obsidian surfaces it to the user.
@@ -60,7 +65,7 @@
 
 	function moduleNotFound(name) {
 		var error = new Error(
-			"Cannot find module '" + name + "'. The browser shim provides: " + SUPPORTED.join(", ") + "."
+			"Cannot find module '" + name + "'. The browser shim provides: " + supportedNames().join(", ") + "."
 		);
 		error.code = "MODULE_NOT_SUPPORTED";
 		error.moduleName = name;
@@ -81,7 +86,7 @@
 	function builtinNotSupported(name) {
 		var error = new Error(
 			"Node.js built-in module '" + name + "' is not provided by the browser shim. " +
-			"Supported modules: " + SUPPORTED.join(", ") + "."
+			"Supported modules: " + supportedNames().join(", ") + "."
 		);
 		error.code = "MODULE_NOT_SUPPORTED";
 		error.moduleName = name;

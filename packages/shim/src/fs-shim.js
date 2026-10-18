@@ -331,7 +331,51 @@
 		});
 	}
 
+	// Mutating ops that can produce an /api/watch event. Reads stay untagged:
+	// they cannot cause a filesystem event, and tagging them would only make
+	// the wire payload larger and hide which calls are actual writes.
+	var TOKEN_OPS = {
+		write: true,
+		writeBinary: true,
+		append: true,
+		appendBinary: true,
+		mkdir: true,
+		rmdir: true,
+		remove: true,
+		rename: true,
+		copy: true,
+		utimes: true
+	};
+
 	function api(op, path, args) {
+		/*
+		 * Echo tagging for /api/watch. This is the single transport-level
+		 * point where a mutation leaves the renderer, so every caller --
+		 * Obsidian's adapter, our own queued sync writes, plugins using
+		 * fs.promises -- gets the token without changing each op signature.
+		 *
+		 * The server attaches originToken to the resulting WS event and
+		 * watch-shim drops events carrying this tab's token (CONTRACTS.md §4).
+		 * Without this, saving a plugin file from this tab would trigger a hot
+		 * reload, whose unload writes data.json, which would trigger another
+		 * reload.
+		 */
+		if (TOKEN_OPS[op] === true) {
+			var sessionToken = window.__MYOBS && window.__MYOBS.sessionToken;
+			if (typeof sessionToken === "string" && sessionToken !== "") {
+				var nextArgs = {};
+				if (args && typeof args === "object") {
+					for (var key in args) {
+						if (Object.prototype.hasOwnProperty.call(args, key)) nextArgs[key] = args[key];
+					}
+				}
+				if (typeof nextArgs.token !== "string" || nextArgs.token === "") {
+					nextArgs.token = sessionToken;
+				}
+				args = nextArgs;
+			}
+		}
+
 		var payload = { op: op, path: path };
 		if (args !== undefined) payload.args = args;
 
@@ -1154,6 +1198,8 @@
 	}
 
 	function makeWatcher() {
+		// Fallback used when watch-shim.js is not loaded: preserve the emitter
+		// shape Obsidian expects so the adapter can still register listeners.
 		var watcher = {
 			on: function () {
 				return watcher;
@@ -1181,9 +1227,15 @@
 		return watcher;
 	}
 
-	function watch(_path, _options, _listener) {
-		// The server's /api/watch WebSocket is the real external-change source.
-		// The adapter's fs.watch callback cannot be emulated synchronously.
+	function watch(path, options, listener) {
+		// fs-shim is loaded before watch-shim (index.html order), so the check
+		// has to happen per call, not at load time. When watch-shim is absent
+		// (isolated harness, WATCH_DISABLED deployments) the no-op watcher keeps
+		// boot working.
+		var delegate = window.__MYOBS_WATCH;
+		if (delegate && typeof delegate.watch === "function") {
+			return delegate.watch(path, options, listener);
+		}
 		return makeWatcher();
 	}
 

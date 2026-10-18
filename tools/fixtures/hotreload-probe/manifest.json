@@ -1,0 +1,9 @@
+{
+	"id": "myobs-hotreload-probe",
+	"name": "myobs hot reload probe",
+	"version": "1.0.0",
+	"minAppVersion": "1.0.0",
+	"description": "Fixture for tools/hotreload-check.mjs. Never install into a real vault.",
+	"author": "my-obsidian tests",
+	"isDesktopOnly": false
+}
