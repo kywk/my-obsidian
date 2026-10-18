@@ -71,8 +71,7 @@ my-obsidian/
 
 | # | 決策 | 結論 |
 |---|---|---|
-| 1 | 交付架構 | 網頁原生客戶端，重用**官方 desktop bundle**（非 mobile bundle）；目標是 Desktop 版 UI 語意 |
-| 2 | Renderer 來源與版本 | 本機 `/Applications/Obsidian.app/Contents/Resources/obsidian.asar`，版本跟隨安裝版（1.14.4）；`scripts/fetch-obsidian.mjs` 取得 |
+| 1 | 交付架構 | 網頁原生客戶端，重用**官方 desktop bundle**（非 mobile bundle）；目標是 Desktop 版 UI 語意 || 2 | Renderer 來源與版本 | 本機 `/Applications/Obsidian.app/Contents/Resources/obsidian.asar`，版本跟隨安裝版（1.14.4）；`scripts/fetch-obsidian.mjs` 取得 |
 | 3 | `terms` 閘 | **首啟同意畫面**：使用者本人按下同意 → 存 server config → 注入 `sendSync("terms")`。**程式碼不內建該字串**。未同意則拒絕啟動並顯示明確錯誤（不可停在白色載入動畫） |
 | 4 | MVP 驗收邊界 | 編輯／預覽、檔案樹、分頁與分割、搜尋、標籤／反向連結、圖譜、Canvas、命令面板、核心 plugin 全數、社群 plugin 可安裝啟用、主題／片段 |
 | 5 | 桌面專屬功能 | **MVP 要，已實作**：多視窗 popout（§11.8）、自繪選單列＋右鍵選單（§11.9）、列印 PDF（§11.10）、手機寬度降級（§11.11）。**降級**：外部 App 開啟（檔案→下載）、`obsidian://`→ web URL。**不做**：全域快捷鍵、系統匣、CLI、Sync/Publish |
@@ -200,13 +199,15 @@ server config，再由此注入（契約欄位為 `termsText`，見 `CONTRACTS.m
 
 | 層 | 指令 | 項目數 | 涵蓋 |
 |---|---|---|---|
-| 單元 | `cd packages/server && npm test` | 217 | fs API、conflict、auth、consent、files/`/v/*`、watch token、proxy、plugins、static |
+| 單元 | `cd packages/server && npm test` | 219 | fs API、conflict、auth、consent、files/`/v/*`、watch token、proxy、plugins、static |
 | 1 | `node tools/spike-check.mjs --vault <複本>` | 8 | boot、>5000 檔、metadata cache、文字往返、二進位往返、冷啟、workspace 隔離、零例外 |
 | 2 | `node tools/hotreload-check.mjs` | 4 | WS 連線、筆記外部變更、plugin 熱重載、回音過濾 |
 | 3 | `node tools/attachment-check.mjs` | 全部 | `/v/*` URL 形狀、位元組一致、瀏覽器實際解碼、Range、pdfjs、編碼檔名 |
 | 4 | `node tools/popout-check.mjs` | 8 | popout 開啟、同一 app 物件、指定筆記、獨立寫入、真實鍵盤輸入、deep link |
 | 5 | `node tools/menu-check.mjs` | 8 | 選單列、render-menu、子選單、狀態同步、appCommand 執行、右鍵選單、Move to new window |
 | 6 | `node tools/print-check.mjs` | 19 | 只印筆記、PDF bytes、狀態還原、manifest、service worker、寬度切換 |
+| 7 | `node tools/dialog-check.mjs` | 14 | `remote.dialog`、FSA／合成路徑、Export to PDF 全鏈路、二次匯出狀態還原 |
+| 8 | `node tools/plugin-install-check.mjs` | 6 | **真實網路**：Browse（popout）→ 搜尋 → Install → Enable → Disable → Uninstall，含完整 proxy/fs 請求清單 |
 
 **全部只對 `~/kywk/obsidian` 的複本執行**，真實 vault 從未被寫入。
 
@@ -418,6 +419,22 @@ parity 缺口只剩「開機自動還原 popout」需要手勢（瀏覽器擋）
 **兩個已知限制**：Obsidian 內建的「Export to PDF」命令仍走 `remote.dialog.showSaveDialog`，
 shim 回 `{canceled:true}`，所以那條路徑到不了列印；popout 視窗沒有載入 `print.js`。
 
+**Export to PDF 已接通（2026-10-18）**：`showSaveDialog` 在支援 File System Access API 且是
+PDF 儲存時使用 `showSaveFilePicker`（`filePath` 只有 `handle.name`，該 API 不揭露目錄），
+否則回 `"<browser-print-dialog>"` 合成路徑讓流程繼續；**非 PDF 存檔一律回 `canceled:true`**
+（回合成相對路徑會讓呼叫端把垃圾檔寫進 vault root）。
+Obsidian 用來預覽的 `window.open("about:blank", "_blank", "popup,hide=true")` 由 `print.js`
+換成**畫面外的同源 iframe**，因此不會多一個空白彈窗，也不會被彈窗阻擋。
+
+實測：`File → Export to PDF` 全鏈路完成，`Page.printToPDF` 產出 768,366 bytes / 12 頁的
+真 PDF；連續匯出兩次狀態都正確還原。`tools/dialog-check.mjs` 14/14。
+
+**仍有限制**：(1) app 永遠不寫入 `filepath`，PDF 只能靠列印對話框落地；(2) 無法分辨使用者
+是取消或列印，`printed:true` 只代表流程已開啟；(3) Export modal 的 pageSize／landscape／
+margins 不套用（由瀏覽器列印分頁取代）；(4) popout realm 未載入 `print.js`，
+其 `print-to-pdf` 由 shim 沿 `__MYOBS_POPOUT_WINDOW.host` 委派回宿主頁（上限 4 層），
+但會印宿主頁的 active view。
+
 ### 11.11 `Platform` 不在 `window` 上
 
 `typeof Platform` 在原始 bundle 是 `undefined`；`app.js` 沒有 `window.Platform = …`。
@@ -434,21 +451,47 @@ shim 回 `{canceled:true}`，所以那條路徑到不了列印；popout 視窗�
 `Platform.isTablet` 是 `false`，而 Obsidian 自己的 600×600 query 是 `matches: true`，
 重算會多套一個原本不存在的 `is-tablet`。
 
-### 11.12 社群外掛的 Browse 是 CORS 問題，不是功能缺失
+### 11.12 社群外掛的 Browse：CORS 只是部分原因，真正的路徑不是我們想的
 
-Obsidian 用 `requestUrl` 抓 `raw.githubusercontent.com` / `github.com`，這些主機不送 CORS 標頭，
-瀏覽器直接 fetch 會失敗。修法分兩層：
+**修正一個我先前的錯誤結論。** 實測（2026-10-18）：
 
-- **client**（`shim/net-rewrite.js`）：只把 allowlist 內的主機改寫成 `/api/proxy?url=…`。
-  這份清單只是提示。
-- **server**（`src/proxy.js`）：**唯一強制點**。deny by default；只允許 https、80/443、
-  非私有 IP、非 URL 內嵌憑證；redirect 逐跳重新驗證；不轉發 Cookie / Authorization，
-  回應剝除 `Set-Cookie`；32 MB 上限、10 秒 timeout。
+- `raw.githubusercontent.com` **有**送 `access-control-allow-origin: *`。
+- `github.com` 的 release 下載**沒有**。
 
-外掛安裝另外走 `src/plugins.js`：向 GitHub API 取 release → 下載 → 驗 manifest / `main.js` /
-digest → **temp + rename 原子替換**（先備份舊目錄，第 2 步失敗就還原）→ 保留 `data.json`。
-卸載是移動到 `.trash/plugins/<id>[-N]`，**絕不覆蓋**既有項目。server 不自動啟用外掛
-（那是使用者的選擇）。
+所以清單抓取其實不會被 CORS 擋；會被擋的是 release 資產下載。我們仍然統一走 `/api/proxy`，
+避免依賴上游的 CORS 政策變動。
 
-實測：`community-plugins.json` 2,767,062 bytes / 9,092 筆；安裝 `dataview` 成功且 digest 相符。
+**真實使用者路徑（完整觀測，不是推論）**
+
+```
+Settings → Community plugins → Browse
+  → window.open(...) 開 popout（CommunityPluginModal.getPopoutOptions）
+  → GET /api/proxy?url=…/community-plugins.json        200（9,097 筆）
+  → GET /api/proxy?url=…/community-plugin-stats.json   200
+按 Install
+  → GET /api/proxy?url=https://github.com/<repo>/releases/download/<tag>/manifest.json   200
+  → GET /api/proxy?url=…/main.js                                                        200
+  → GET /api/proxy?url=…/styles.css                                                     200
+     （proxy 在 server 端逐跳跟隨 302 → release-assets.githubusercontent.com）
+  → POST /api/fs { op:"access" }  .obsidian/plugins
+  → POST /api/fs { op:"mkdir" }   .obsidian/plugins/<id>
+  → POST /api/fs { op:"write" }   manifest.json / main.js / styles.css   ← adapter.write，不是 writeBinary
+Enable → app.plugins.enablePluginAndSave → 寫 community-plugins.json → require(main.js)
+Uninstall → adapter.rmdir(dir, true) → /api/fs { op:"rmdir" }   ← 直接刪除，不進 .trash
+```
+
+**三個必須記住的結論**
+
+1. **UI 完全不呼叫 `/api/plugins/*`。** 實測 `serverPluginCalls: []`。
+   `POST /api/plugins/install`（含 digest 驗證與 temp+rename）是**程式化路徑**，保留給自動化與庫存，
+   兩條路徑不要混用。
+2. **Browse 開在 popout 裡**，所以 popout（§11.8）是外掛安裝的**必要條件**，不是加分項。
+   任何自動化測試都必須 attach 到 popout target，主視窗只是空殼。
+3. **UI 路徑的安全性是 Obsidian 自己的**：逐檔寫入、**無 digest 驗證、非原子**；
+   卸載直接 `rmdir`、**不進 `.trash`**。這些是它的行為，我們沒有 patch。
+   server 端點是我們能提供較強保證的那條（原子替換、digest、`.trash` 可復原）。
+
+**已知 fallback**：Obsidian 的 `QS()` 在 github/raw 失敗時會改打
+`https://releases.obsidian.md/proxy?url=…`。該 host 不在 allowlist，成功路徑不會用到；
+但 proxy 失敗時 fallback 會變瀏覽器直連並可能 CORS 失敗。列為決策點，尚未處理。
 

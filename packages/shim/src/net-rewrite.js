@@ -32,6 +32,9 @@
 		"raw.githubusercontent.com": true,
 		"objects.githubusercontent.com": true,
 		"github-releases.githubusercontent.com": true,
+		// GitHub moved release-asset downloads here; the same host must be in
+		// PROXY_ALLOWED_HOSTS in packages/server/src/proxy.js.
+		"release-assets.githubusercontent.com": true,
 		"codeload.github.com": true,
 		"obsidian.md": true,
 		"forum.obsidian.md": true,

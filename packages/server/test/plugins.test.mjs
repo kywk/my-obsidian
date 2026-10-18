@@ -7,6 +7,7 @@ import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
 import { buildApp } from '../src/index.js';
+import { PROXY_ALLOWED_HOSTS, validateProxyUrl } from '../src/proxy.js';
 
 /** @param {Buffer | string} content */
 function digestOf(content) {
@@ -465,6 +466,75 @@ describe('GET /api/proxy — upstream behaviour', () => {
     const response = await get(`${upstream.url}/stall`);
     assert.equal(response.statusCode, 504);
     assert.equal(response.json().error.code, 'ETIMEDOUT');
+  });
+});
+
+describe('GET /api/proxy — GitHub release assets', () => {
+  /** @type {string} */
+  let vault;
+  /** @type {import('fastify').FastifyInstance} */
+  let app;
+
+  before(async () => {
+    vault = await makeVault();
+  });
+
+  after(async () => {
+    if (app) await app.close();
+    await fs.promises.rm(vault, { recursive: true, force: true });
+  });
+
+  it('keeps release-assets.githubusercontent.com in the production allowlist', () => {
+    assert.ok(PROXY_ALLOWED_HOSTS.includes('release-assets.githubusercontent.com'));
+    assert.doesNotThrow(() =>
+      validateProxyUrl(
+        'https://release-assets.githubusercontent.com/github-production-release-asset/x?token=1',
+      ),
+    );
+  });
+
+  it('follows a github.com release redirect to release-assets under the default allowlist', async () => {
+    /** @type {string[]} */
+    const calls = [];
+    app = await makeApp(vault, {
+      proxy: {
+        // No allowedHosts/allowHttp overrides: this exercises the same policy
+        // the browser hits in production.
+        fetchImpl: async (url) => {
+          calls.push(url);
+          if (url === 'https://github.com/o/r/releases/download/v1/main.js') {
+            return new Response(null, {
+              status: 302,
+              headers: {
+                location:
+                  'https://release-assets.githubusercontent.com/github-production-release-asset/x?token=1',
+              },
+            });
+          }
+          if (
+            url ===
+            'https://release-assets.githubusercontent.com/github-production-release-asset/x?token=1'
+          ) {
+            return new Response('asset-bytes', {
+              status: 200,
+              headers: { 'content-type': 'application/octet-stream' },
+            });
+          }
+          throw new Error(`unexpected upstream URL: ${url}`);
+        },
+      },
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/proxy?url=${encodeURIComponent('https://github.com/o/r/releases/download/v1/main.js')}`,
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(response.body, 'asset-bytes');
+    assert.deepEqual(calls, [
+      'https://github.com/o/r/releases/download/v1/main.js',
+      'https://release-assets.githubusercontent.com/github-production-release-asset/x?token=1',
+    ]);
   });
 });
 

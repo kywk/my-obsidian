@@ -9,7 +9,8 @@
  *
  *   1. owns the `print-to-pdf` channel on the renderer side (send / invoke /
  *      on / once), runs the browser print flow, and answers the caller with an
- *      explicit `{ ok:false, reason:"browser-print-dialog" }` result;
+ *      explicit `{ ok, reason:"browser-print-dialog", printed, fileWritten:false }`
+ *      result;
  *   2. puts the active note's view into a dedicated `<div class="print">`
  *      container and hides the rest of the application, so only that note is
  *      printed;
@@ -17,6 +18,12 @@
  *      stylesheet afterwards, including when `window.print()` throws;
  *   4. exposes the flow for harnesses:
  *        window.__MYOBS_PRINT = { printActiveNote(), lastResult, events[] }
+ *
+ * Obsidian's own "Export to PDF" dialog is covered too: electron-shim now
+ * answers remote.dialog.showSaveDialog, and the throwaway window the export
+ * path opens ("popup,hide=true") is replaced by a hidden iframe (see
+ * installPdfSurface()). The send therefore lands here instead of vanishing in
+ * a popup realm that never loaded this file.
  *
  * Why move the view instead of only adding `@media print` rules that reveal
  * the leaf: Obsidian's own app.css already contains
@@ -39,14 +46,15 @@
  *
  * Honest limitations (also reported to the caller):
  *   - `filepath` is never written; the user chooses the destination in the
- *     print dialog.
- *   - Obsidian's own "Export to PDF" dialog goes through
- *     `remote.dialog.showSaveDialog`, which electron-shim answers with
- *     `{canceled:true}`; that path never reaches this module. Plugins and any
- *     direct `ipcRenderer.send("print-to-pdf", ...)` callers do.
+ *     print dialog. Even when File System Access returns a real handle, the
+ *     browser has no Page.printToPDF equivalent, so the handle is not used.
+ *   - The export dialog's includeName / pageSize / margin settings are ignored:
+ *     the browser print dialog owns pagination.
  *   - In source mode the CodeMirror editor virtualizes long documents, so a
  *     very long note may print only the rendered lines. Reading view prints
  *     the full document; the flow uses whichever view the leaf is showing.
+ *   - Popout windows do not load this file. Their print-to-pdf sends are
+ *     delegated to the hosting page through electron-shim's printHost().
  */
 (function () {
 	"use strict";
@@ -366,6 +374,104 @@
 		return { ok: true, restored: restored };
 	}
 
+	// ---------------------------------------------------------------------
+	// Export to PDF ("popup,hide=true")
+	//
+	// Obsidian's own export renders a fresh copy of the note into a throwaway
+	// window it opens with window.open("about:blank", "_blank",
+	// "popup,hide=true"), then sends print-to-pdf from that window. Chromium
+	// ignores `hide=true`, so the user would see an empty popup (and a
+	// post-picker window.open can be blocked outright because the user gesture
+	// was consumed by the save picker). The renderer only needs a document it
+	// can write into and a `window.electron`; a hidden same-origin iframe
+	// provides both. h0() walks to the top window for `require`, so the
+	// iframe inherits this page's electron shim and the print-to-pdf send
+	// lands back on this module.
+	// ---------------------------------------------------------------------
+
+	var PDF_SURFACE_TIMEOUT_MS = 60000;
+	var PDF_SURFACE_RELEASE_MS = 250;
+	/** @type {null | { frame: HTMLIFrameElement, win: Window, at: number, timer: number }} */
+	var pdfSurface = null;
+
+	function isPdfSurfaceRequest(url, features) {
+		if (url !== "about:blank") return false;
+		if (typeof features !== "string") return false;
+		return /(^|[,;])\s*hide\s*=\s*true\s*($|[,;])/i.test(features);
+	}
+
+	function removePdfSurface(surface) {
+		if (!surface || !surface.frame) return;
+		try {
+			if (surface.frame.parentNode) surface.frame.parentNode.removeChild(surface.frame);
+		} catch (err) {
+			/* already detached */
+		}
+	}
+
+	function releasePdfSurface(reason) {
+		var surface = pdfSurface;
+		if (!surface) return;
+		pdfSurface = null;
+		if (surface.timer) window.clearTimeout(surface.timer);
+		// Defer removal: the caller's finally block still runs r.detach(),
+		// o.unload(), t.close() against this document after the IPC reply.
+		// Pulling the frame out first makes t.close() throw in the caller.
+		window.setTimeout(function () {
+			removePdfSurface(surface);
+			record("pdf-surface-released", { reason: reason });
+		}, PDF_SURFACE_RELEASE_MS);
+	}
+
+	function openPdfSurface() {
+		releasePdfSurface("replaced");
+		var frame = document.createElement("iframe");
+		frame.setAttribute("aria-hidden", "true");
+		frame.setAttribute("data-myobs-pdf-surface", "1");
+		frame.setAttribute("title", "PDF export");
+		// Off-screen but laid out: display:none would give the document no
+		// layout and the renderer measures/creates elements inside it.
+		frame.style.cssText =
+			"position:fixed;left:-20000px;top:0;width:1024px;height:768px;" +
+			"border:0;visibility:hidden;pointer-events:none;";
+		(document.body || document.documentElement).appendChild(frame);
+		var win = frame.contentWindow;
+		if (!win || !win.document) {
+			removePdfSurface({ frame: frame });
+			throw new Error("PDF surface iframe has no document");
+		}
+		var surface = { frame: frame, win: win, at: Date.now(), timer: 0 };
+		surface.timer = window.setTimeout(function () {
+			if (pdfSurface !== surface) return;
+			pdfSurface = null;
+			removePdfSurface(surface);
+			record("pdf-surface-timeout", {});
+		}, PDF_SURFACE_TIMEOUT_MS);
+		pdfSurface = surface;
+		record("pdf-surface", {});
+		return win;
+	}
+
+	function installPdfSurface() {
+		var nativeOpen = window.open;
+		if (typeof nativeOpen !== "function") return false;
+		window.open = function (url, target, features) {
+			if (isPdfSurfaceRequest(url, features)) {
+				try {
+					return openPdfSurface();
+				} catch (err) {
+					record("pdf-surface-failed", {
+						error: String((err && err.message) || err)
+					});
+					// Fall through to the real window so the caller still gets
+					// a window object; a visible popup beats a TypeError.
+				}
+			}
+			return nativeOpen.apply(window, arguments);
+		};
+		return true;
+	}
+
 	/**
 	 * Print the active note through the browser's print dialog.
 	 *
@@ -385,6 +491,7 @@
 					message: "目前沒有開啟的筆記，取消列印；請先開啟一篇筆記再列印。",
 				},
 				filepath: options.filepath != null ? String(options.filepath) : null,
+				printed: false,
 				fileWritten: false,
 				at: Date.now(),
 			};
@@ -400,6 +507,7 @@
 				reason: begun.reason || "begin-failed",
 				error: begun.error,
 				filepath: options.filepath != null ? String(options.filepath) : null,
+				printed: false,
 				fileWritten: false,
 				at: Date.now(),
 			};
@@ -493,6 +601,45 @@
 		};
 	}
 
+	/**
+	 * One print-to-pdf round trip, shared by this page's IPC wrapper and by
+	 * electron-shim when a popout (or the PDF surface) delegates the send to
+	 * the hosting page.
+	 *
+	 * @param {object|null} payload
+	 * @returns {object} IPC reply shape
+	 */
+	function handleIpc(payload) {
+		var reply;
+		try {
+			reply = ipcResult(printActiveNote(payload || {}), payload);
+		} catch (err) {
+			// A renderer-side failure must still settle the caller's promise;
+			// otherwise its once("print-to-pdf") listener waits forever.
+			try {
+				if (activeTarget) endPrintView("ipc-error");
+			} catch (restoreErr) {
+				record("restore-failed", {
+					error: String((restoreErr && restoreErr.message) || restoreErr)
+				});
+			}
+			reply = {
+				ok: false,
+				reason: "print-failed",
+				printed: false,
+				fileWritten: false,
+				filepath: payload && payload.filepath != null ? String(payload.filepath) : null,
+				error: {
+					code: "PRINT_FAILED",
+					message: String((err && err.message) || err)
+				}
+			};
+			record("ipc-failed", { error: reply.error.message });
+		}
+		releasePdfSurface("printed");
+		return reply;
+	}
+
 	function electronIpcRenderer() {
 		try {
 			var modules = window.__MYOBS_MODULES;
@@ -553,8 +700,7 @@
 			if (channel !== "print-to-pdf") return originalSend.apply(ipc, arguments);
 			var payload = arguments.length > 1 ? arguments[1] : null;
 			queueMicrotask(function () {
-				var result = printActiveNote(payload || {});
-				dispatchPrint([ipcResult(result, payload)]);
+				dispatchPrint([handleIpc(payload)]);
 			});
 			return undefined;
 		};
@@ -562,7 +708,7 @@
 			if (channel !== "print-to-pdf") return originalInvoke.apply(ipc, arguments);
 			var payload = arguments.length > 1 ? arguments[1] : null;
 			return Promise.resolve().then(function () {
-				return ipcResult(printActiveNote(payload || {}), payload);
+				return handleIpc(payload);
 			});
 		};
 		ipc.__myobsPrintWrapped = true;
@@ -618,12 +764,14 @@
 		printActiveNote: printActiveNote,
 		beginPrintView: beginPrintView,
 		endPrintView: endPrintView,
+		handleIpc: handleIpc,
 		lastResult: lastResult,
 		events: events,
 	};
 
 	window.__MYOBS_PRINT = api;
 
+	installPdfSurface();
 	installIpcOwnership();
 	// The browser's own print command (Ctrl/Cmd+P) never goes through our API.
 	// Apply the print view synchronously for it too; afterprint restores. If no

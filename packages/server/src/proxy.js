@@ -34,6 +34,9 @@ export const PROXY_ALLOWED_HOSTS = Object.freeze([
   'raw.githubusercontent.com',
   'objects.githubusercontent.com',
   'github-releases.githubusercontent.com',
+  // GitHub moved release-asset downloads here; without it, installing a plugin
+  // through Obsidian's own Browse UI 403s after the redirect from github.com.
+  'release-assets.githubusercontent.com',
   'codeload.github.com',
   'obsidian.md',
   'forum.obsidian.md',

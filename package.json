@@ -1,0 +1,26 @@
+{
+  "name": "my-obsidian",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "在瀏覽器執行官方 Obsidian renderer，由自架 Node 服務提供 vault 檔案 API",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "vendor": "node scripts/fetch-obsidian.mjs",
+    "start": "node scripts/start.mjs",
+    "doctor": "node scripts/start.mjs --doctor",
+    "test": "npm --prefix packages/server test",
+    "test:unit": "npm --prefix packages/server test",
+    "check:spike": "node tools/spike-check.mjs",
+    "check:hotreload": "node tools/hotreload-check.mjs",
+    "check:attachment": "node tools/attachment-check.mjs",
+    "check:popout": "node tools/popout-check.mjs",
+    "check:menu": "node tools/menu-check.mjs",
+    "check:print": "node tools/print-check.mjs",
+    "check:dialog": "node tools/dialog-check.mjs",
+    "check:plugin-install": "node tools/plugin-install-check.mjs"
+  }
+}

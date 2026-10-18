@@ -385,6 +385,93 @@
 		}
 	}
 
+	/*
+	 * print.js is not loaded into popout realms (popout.js only injects the
+	 * /shim/* scripts), but Obsidian's Export to PDF sends print-to-pdf from
+	 * the throwaway window it opens. Resolve the printer in this order:
+	 *
+	 *   1. this realm's own print module (normal page);
+	 *   2. the page that hosts this popout (window.__MYOBS_POPOUT_WINDOW.host).
+	 *
+	 * The reply always comes back through *this* realm's ipcRenderer because
+	 * that is where the caller registered its once("print-to-pdf") listener.
+	 */
+	function printHost() {
+		var realm = window;
+		try {
+			// A popout may itself host the throwaway PDF window; walking the
+			// membership chain reaches the page that actually loaded print.js.
+			for (var depth = 0; depth < 4; depth++) {
+				var printer = realm.__MYOBS_PRINT;
+				if (printer && typeof printer.handleIpc === "function") return printer;
+				var membership = realm.__MYOBS_POPOUT_WINDOW;
+				var host = membership && membership.host;
+				if (!host || host === realm) break;
+				realm = host;
+			}
+		} catch (err) {
+			console.warn("[my-obsidian] could not resolve the print host", err);
+		}
+		return null;
+	}
+
+	function printFailure(payload, error) {
+		return {
+			ok: false,
+			reason: "print-unavailable",
+			printed: false,
+			fileWritten: false,
+			filepath:
+				payload && payload.filepath != null ? String(payload.filepath) : null,
+			error: error
+				? {
+					code: "PRINT_FAILED",
+					message: String(error && error.message ? error.message : error)
+				}
+				: {
+					code: "PRINT_UNAVAILABLE",
+					message:
+						"瀏覽器列印模組未載入，無法列印。請確認 /runtime/print.js 已載入後重新載入頁面。"
+				}
+		};
+	}
+
+	function printViaHost(payload) {
+		var host = printHost();
+		if (!host) return printFailure(payload);
+		try {
+			if (typeof host.handleIpc === "function") {
+				return host.handleIpc(payload || {});
+			}
+			if (typeof host.printActiveNote === "function") {
+				var result = host.printActiveNote(payload || {});
+				return {
+					ok: Boolean(result && result.ok),
+					reason: (result && result.reason) || "browser-print-dialog",
+					printed: Boolean(result && result.printed),
+					fileWritten: false,
+					filepath:
+						payload && payload.filepath != null ? String(payload.filepath) : null,
+					path: result && result.path ? result.path : null,
+					error: result && result.error ? result.error : undefined
+				};
+			}
+		} catch (err) {
+			console.error("[my-obsidian] print-to-pdf failed", err);
+			return printFailure(payload, err);
+		}
+		return printFailure(payload);
+	}
+
+	function answerPrintToPdf(payload, reply) {
+		// Always asynchronous: printActiveNote() calls window.print(), which
+		// blocks in a real browser, and callers register their once() listener
+		// right after send() returns.
+		queueMicrotask(function () {
+			reply(printViaHost(payload));
+		});
+	}
+
 	function send(channel) {
 		var args = Array.prototype.slice.call(arguments, 1);
 
@@ -392,13 +479,18 @@
 			case "request-url":
 				handleRequestUrl(args[0], args[1]);
 				return;
-			case "print-to-pdf":
-				// The browser cannot produce an Electron PDF buffer. Complete
-				// the reply so callers do not hang; the result is null.
-				queueMicrotask(function () {
-					emit("print-to-pdf", [null]);
+			case "print-to-pdf": {
+				// Electron answers with a PDF buffer (or writes filepath). The
+				// browser cannot, so print.js takes over and replies with the
+				// explicit, honest result shape. The reply is emitted in this
+				// realm because that is where the once() listener lives; when
+				// this is a popout, the work happens in the hosting page.
+				var payload = args[0] || null;
+				answerPrintToPdf(payload, function (result) {
+					emit("print-to-pdf", [result]);
 				});
 				return;
+			}
 			case "context-menu":
 				// Request/reply channel: Obsidian asks the host for editFlags
 				// before it draws the editor context menu, and abandons the menu
@@ -477,7 +569,9 @@
 			case "request-url":
 				return requestUrl(args[0]);
 			case "print-to-pdf":
-				return Promise.resolve(null);
+				return Promise.resolve().then(function () {
+					return printViaHost(args[0] || null);
+				});
 			case "register-cli":
 				return Promise.resolve(false);
 			default:
@@ -876,29 +970,373 @@
 		}
 	};
 
+	// ---------------------------------------------------------------------
+	// remote.dialog
+	//
+	// A browser tab has no native dialog host, so every API below either maps
+	// onto a browser primitive or reports honestly that the operation cannot
+	// be performed. The one that matters for Obsidian's own Export to PDF is
+	// showSaveDialog: File System Access gives us a real, writable handle when
+	// the browser supports it and the call happens inside a user gesture.
+	//
+	// `filePath` in that case is only the handle's name, not an absolute path:
+	// the File System Access API deliberately hides the directory. When the
+	// picker is unavailable (Firefox, Safari, a non-gesture call, or a headless
+	// harness) the export chain is kept alive with a synthetic marker path;
+	// the actual artifact is produced by the browser's print dialog, never by
+	// this shim. Both paths report the same Electron-shaped result:
+	//   { canceled, filePath, filePaths }
+	// ---------------------------------------------------------------------
+
+	var SYNTHETIC_SAVE_PATH = "<browser-print-dialog>";
+	var MIME_BY_EXTENSION = {
+		pdf: "application/pdf",
+		png: "image/png",
+		jpg: "image/jpeg",
+		jpeg: "image/jpeg",
+		gif: "image/gif",
+		webp: "image/webp",
+		svg: "image/svg+xml",
+		ico: "image/x-icon",
+		icns: "image/icns",
+		txt: "text/plain",
+		md: "text/markdown",
+		markdown: "text/markdown",
+		json: "application/json",
+		html: "text/html",
+		css: "text/css",
+		js: "text/javascript",
+		csv: "text/csv"
+	};
+	var dialogCalls = [];
+	var dialogState = {
+		installed: true,
+		calls: dialogCalls,
+		lastResult: null,
+		/** "file-system-access" | "synthetic" | "canceled" for the last save dialog. */
+		lastSaveSource: null,
+		syntheticPath: SYNTHETIC_SAVE_PATH
+	};
+	var warnedOpenDialog = false;
+	var warnedSaveDialog = false;
+
+	function baseName(value) {
+		var text = String(value == null ? "" : value);
+		var index = Math.max(text.lastIndexOf("/"), text.lastIndexOf("\\"));
+		return index === -1 ? text : text.slice(index + 1);
+	}
+
+	/*
+	 * Only a PDF save request has a browser landing path: the print dialog.
+	 * For anything else (Canvas -> Export image, plugin JSON exports) a
+	 * synthetic path would make the caller write a *relative* name, which the
+	 * fs shim resolves under the vault root. Returning canceled is the honest
+	 * answer there; returning success would silently put the file in the wrong
+	 * place or fail later with a confusing ENOENT.
+	 */
+	function wantsPdfSave(options) {
+		var opts = options || {};
+		if (/\.pdf$/i.test(baseName(opts.defaultPath))) return true;
+		if (!Array.isArray(opts.filters)) return false;
+		for (var i = 0; i < opts.filters.length; i++) {
+			var filter = opts.filters[i];
+			if (!filter || !Array.isArray(filter.extensions)) continue;
+			for (var j = 0; j < filter.extensions.length; j++) {
+				if (String(filter.extensions[j] == null ? "" : filter.extensions[j]).toLowerCase() === "pdf") {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	function dialogMessage(options) {
+		var opts = options || {};
+		var parts = [];
+		if (opts.title) parts.push(String(opts.title));
+		if (opts.message) parts.push(String(opts.message));
+		if (opts.detail) parts.push(String(opts.detail));
+		return parts.join("\n\n") || "Obsidian";
+	}
+
+	function filePickerTypes(filters) {
+		if (!Array.isArray(filters)) return undefined;
+		var seenExtensions = Object.create(null);
+		var types = [];
+		for (var i = 0; i < filters.length; i++) {
+			var filter = filters[i];
+			if (!filter || !Array.isArray(filter.extensions)) continue;
+			var accept = {};
+			for (var j = 0; j < filter.extensions.length; j++) {
+				var extension = String(filter.extensions[j] == null ? "" : filter.extensions[j])
+					.trim()
+					.replace(/^\./, "")
+					.toLowerCase();
+				// "*" (Electron's "All Files") has no File System Access
+				// equivalent; omitting it leaves the picker unrestricted. Keep
+				// only simple extensions: Chrome rejects some multi-dot or
+				// over-long shapes, and one bad entry fails the whole picker.
+				if (!extension || extension === "*" || !/^[a-z0-9]{1,16}$/.test(extension)) continue;
+				if (seenExtensions[extension]) continue;
+				seenExtensions[extension] = true;
+				var mime = MIME_BY_EXTENSION[extension] || "application/octet-stream";
+				if (!accept[mime]) accept[mime] = [];
+				accept[mime].push("." + extension);
+			}
+			var keys = Object.keys(accept);
+			if (keys.length === 0) continue;
+			types.push({
+				description: String(filter.name || "Files"),
+				accept: accept
+			});
+		}
+		return types.length > 0 ? types : undefined;
+	}
+
+	function summarizeDialogOptions(options) {
+		var opts = options || {};
+		var summary = {};
+		if (opts.title != null) summary.title = String(opts.title);
+		if (opts.defaultPath != null) summary.defaultPath = String(opts.defaultPath);
+		if (opts.message != null) summary.message = String(opts.message);
+		if (opts.detail != null) summary.detail = String(opts.detail);
+		if (Array.isArray(opts.buttons)) summary.buttons = opts.buttons.map(String);
+		if (Array.isArray(opts.properties)) summary.properties = opts.properties.map(String);
+		if (Array.isArray(opts.filters)) {
+			summary.filters = opts.filters.map(function (filter) {
+				return {
+					name: filter && filter.name != null ? String(filter.name) : "",
+					extensions:
+						filter && Array.isArray(filter.extensions)
+							? filter.extensions.map(String)
+							: []
+				};
+			});
+		}
+		if (opts.checkboxLabel != null) summary.checkboxLabel = String(opts.checkboxLabel);
+		if (opts.checkboxChecked != null) summary.checkboxChecked = opts.checkboxChecked === true;
+		return summary;
+	}
+
+	function recordDialogCall(method, options, result) {
+		var entry = {
+			at: Date.now(),
+			method: method,
+			options: summarizeDialogOptions(options),
+			result: result
+		};
+		dialogCalls.push(entry);
+		if (dialogCalls.length > 50) dialogCalls.shift();
+		dialogState.lastResult = result;
+		return entry;
+	}
+
+	function saveResult(filePath, source) {
+		var result = {
+			canceled: false,
+			filePath: filePath,
+			filePaths: [filePath]
+		};
+		dialogState.lastSaveSource = source;
+		return result;
+	}
+
+	function canceledSaveResult() {
+		dialogState.lastSaveSource = "canceled";
+		return { canceled: true, filePath: undefined, filePaths: [] };
+	}
+
+	function handlePickerFailure(err) {
+		// AbortError is the user pressing Cancel in the picker: that is a real
+		// cancellation, not an unavailable API. Anything else (SecurityError
+		// without a user gesture, an unsupported options shape, a headless
+		// browser with no picker UI) means this realm cannot present the
+		// picker; fall back to the marker so the caller's export chain still
+		// reaches the browser print dialog.
+		if (err && err.name === "AbortError") return canceledSaveResult();
+		console.info(
+			"[my-obsidian] showSaveFilePicker is unavailable here (" +
+				(err && (err.name || err.message) ? err.name || err.message : String(err)) +
+				"); returning the synthetic print-dialog path instead."
+		);
+		return saveResult(SYNTHETIC_SAVE_PATH, "synthetic");
+	}
+
+	function showSaveDialog(options) {
+		var opts = options || {};
+		var suggestedName = baseName(opts.defaultPath) || "obsidian-export";
+		if (!wantsPdfSave(opts)) {
+			if (!warnedSaveDialog) {
+				warnedSaveDialog = true;
+				console.info(
+					"[my-obsidian] remote.dialog.showSaveDialog only continues for PDF exports: " +
+						"the browser print dialog is the only place a file can be written. " +
+						"Returning { canceled:true } for this save request."
+				);
+			}
+			var canceled = canceledSaveResult();
+			recordDialogCall("showSaveDialog", opts, canceled);
+			return Promise.resolve(canceled);
+		}
+		var picker = null;
+		try {
+			if (typeof window.showSaveFilePicker === "function") {
+				picker = window.showSaveFilePicker;
+			}
+		} catch (err) {
+			picker = null;
+		}
+
+		if (!picker) {
+			var synthetic = saveResult(SYNTHETIC_SAVE_PATH, "synthetic");
+			recordDialogCall("showSaveDialog", opts, synthetic);
+			return Promise.resolve(synthetic);
+		}
+
+		var pickerOptions = { suggestedName: suggestedName };
+		var types = filePickerTypes(opts.filters);
+		if (types) pickerOptions.types = types;
+
+		var pending;
+		try {
+			// Called synchronously from the caller's task so the browser still
+			// sees the user gesture. Deferring this into a .then() would turn a
+			// real picker into a SecurityError in some browsers.
+			pending = picker.call(window, pickerOptions);
+		} catch (err) {
+			var failed = handlePickerFailure(err);
+			recordDialogCall("showSaveDialog", opts, failed);
+			return Promise.resolve(failed);
+		}
+
+		return Promise.resolve(pending).then(
+			function (handle) {
+				var name = handle && handle.name ? String(handle.name) : suggestedName;
+				var result = saveResult(name, "file-system-access");
+				recordDialogCall("showSaveDialog", opts, result);
+				return result;
+			},
+			function (err) {
+				var result = handlePickerFailure(err);
+				recordDialogCall("showSaveDialog", opts, result);
+				return result;
+			}
+		);
+	}
+
+	function showOpenDialog(options, method) {
+		if (!warnedOpenDialog) {
+			warnedOpenDialog = true;
+			console.info(
+				"[my-obsidian] remote.dialog.showOpenDialog is not available: this runtime only " +
+					"has the vault, not the host filesystem. Returning { canceled:true, filePaths:[] }. " +
+					"Use the vault's own file picker or drag-and-drop instead."
+			);
+		}
+		var result = { canceled: true, filePaths: [] };
+		recordDialogCall(method || "showOpenDialog", options, result);
+		return Promise.resolve(result);
+	}
+
+	function buttonIndex(options, candidate, names) {
+		var buttons = Array.isArray(options.buttons) ? options.buttons : [];
+		if (typeof candidate === "number" && candidate >= 0 && candidate < buttons.length) {
+			return candidate;
+		}
+		for (var i = 0; i < buttons.length; i++) {
+			var label = String(buttons[i] == null ? "" : buttons[i]).trim();
+			if (names.test(label)) return i;
+		}
+		return 0;
+	}
+
+	function messageBoxResult(options) {
+		var opts = options || {};
+		var buttons = Array.isArray(opts.buttons) && opts.buttons.length > 0
+			? opts.buttons.map(String)
+			: ["OK"];
+		var text = dialogMessage(opts);
+		var response;
+		try {
+			if (buttons.length <= 1) {
+				window.alert(text);
+				response = 0;
+			} else if (buttons.length === 2) {
+				response = window.confirm(text)
+					? buttonIndex(opts, opts.defaultId, /^(ok|yes|accept|save|delete|export)$/i)
+					: buttonIndex(opts, opts.cancelId, /^(cancel|no)$/i);
+			} else {
+				// confirm() cannot express three or more choices; prompt() can at
+				// least preserve the index mapping (and returns null on cancel).
+				var lines = buttons.map(function (label, index) {
+					return index + 1 + ". " + label;
+				});
+				var answer = window.prompt(
+					text + "\n\n" + lines.join("\n") + "\n\nEnter 1-" + buttons.length + ":",
+					String(buttonIndex(opts, opts.defaultId, /^(ok|yes|accept)$/i) + 1)
+				);
+				var picked = answer == null ? NaN : parseInt(answer, 10);
+				response =
+					isFinite(picked) && picked >= 1 && picked <= buttons.length
+						? picked - 1
+						: buttonIndex(opts, opts.cancelId, /^(cancel|no)$/i);
+			}
+		} catch (err) {
+			// A sandboxed realm may refuse confirm/prompt. Never leave the
+			// caller hanging: report the default/cancel choice instead.
+			response = buttonIndex(opts, opts.cancelId, /^(cancel|no)$/i);
+		}
+		return {
+			response: response,
+			checkboxChecked: opts.checkboxLabel != null ? opts.checkboxChecked === true : false
+		};
+	}
+
 	var dialogStub = {
-		showOpenDialogSync: function () {
-			return null;
+		showOpenDialogSync: function (options) {
+			showOpenDialog(options, "showOpenDialogSync");
+			// Electron's sync variant returns string[] | undefined, not an object.
+			return undefined;
 		},
-		showOpenDialog: function () {
-			return Promise.resolve({ canceled: true, filePaths: [] });
+		showOpenDialog: showOpenDialog,
+		showSaveDialogSync: function (options) {
+			// There is no synchronous way to present showSaveFilePicker. Keep
+			// Electron's sync return contract (string | undefined): the PDF
+			// case gets the same marker the async path uses; other save
+			// requests are canceled so callers do not write a relative name
+			// into the vault root.
+			if (!wantsPdfSave(options)) {
+				var canceled = canceledSaveResult();
+				recordDialogCall("showSaveDialogSync", options, canceled);
+				return undefined;
+			}
+			var result = saveResult(SYNTHETIC_SAVE_PATH, "synthetic");
+			recordDialogCall("showSaveDialogSync", options, result);
+			return result.filePath;
 		},
-		showSaveDialogSync: function () {
-			return null;
+		showSaveDialog: showSaveDialog,
+		showMessageBoxSync: function (options) {
+			var result = messageBoxResult(options);
+			recordDialogCall("showMessageBoxSync", options, result);
+			return result.response;
 		},
-		showSaveDialog: function () {
-			return Promise.resolve({ canceled: true, filePath: undefined });
-		},
-		showMessageBoxSync: function () {
-			return 0;
-		},
-		showMessageBox: function () {
-			return Promise.resolve({ response: 0, checkboxChecked: false });
+		showMessageBox: function (options) {
+			var result = messageBoxResult(options);
+			recordDialogCall("showMessageBox", options, result);
+			return Promise.resolve(result);
 		},
 		showErrorBox: function (title, content) {
+			var text = dialogMessage({ title: title, message: content });
+			try {
+				window.alert(text);
+			} catch (err) {
+				/* alert is blocked in some sandboxed realms */
+			}
 			console.error("[my-obsidian] " + title + ": " + content);
 		}
 	};
+
+	window.__MYOBS_DIALOG = dialogState;
 
 	function makeSession() {
 		var languages = makeLanguageList();
