@@ -29,6 +29,27 @@ import { fileURLToPath } from 'node:url';
 export const MIN_TERMS_LENGTH = 40;
 
 /**
+ * Statements the operator must affirm before the gate opens. The ids are the
+ * wire contract between consent.html and POST /api/consent; the wording lives
+ * in the page and in NOTICE.md. Each one maps to a real obligation:
+ *
+ *   unofficial        this project is not Obsidian and has no endorsement
+ *   obsidian-terms    the operator has read and accepts Obsidian's own terms
+ *   private-use       no serving the renderer to others without Obsidian's consent
+ *   own-risk          provided as-is; the operator is responsible for their vault
+ *
+ * Bump CONSENT_NOTICE_VERSION whenever the wording changes materially so the
+ * stored record says which text was actually shown.
+ */
+export const REQUIRED_ACKNOWLEDGEMENTS = Object.freeze([
+  'unofficial',
+  'obsidian-terms',
+  'private-use',
+  'own-risk',
+]);
+export const CONSENT_NOTICE_VERSION = '2026-10-24';
+
+/**
  * Read the renderer's own acknowledgement literal at runtime.
  *
  * This is only used by local dev mode. The value never leaves memory and is
@@ -105,6 +126,8 @@ export const FALLBACK_CONSENT_HTML = `<!doctype html>
 在專案根目錄執行以下指令，取出 <code>vendor/obsidian/app.js</code> 內用來比對的字面值，貼到下面並送出：</p>
 <pre>grep -o '"[^"]\\{40,\\}"[^"]*sendSync("terms")' vendor/obsidian/app.js | sed 's/^"//; s/".*$//'</pre>
 <form id="f">
+<p><label><input type="checkbox" id="ack"> 我了解這是與 Obsidian 無隸屬關係的非官方專案；我已閱讀並接受 Obsidian 自己的條款；
+我只在自己的機器與 vault 使用、不對他人提供 renderer；本軟體不附保證，風險自負（詳見 NOTICE.md）。</label></p>
 <textarea id="terms" rows="6" cols="80" spellcheck="false"></textarea>
 <button type="submit">我確認，並寫入設定檔</button>
 </form>
@@ -115,6 +138,10 @@ document.getElementById("f").addEventListener("submit", function (e) {
 	e.preventDefault();
 	var value = document.getElementById("terms").value.trim();
 	var out = document.getElementById("m");
+	if (!document.getElementById("ack").checked) {
+		out.textContent = "請先勾選確認事項。";
+		return;
+	}
 	if (value.length < ${MIN_TERMS_LENGTH}) {
 		out.textContent = "字串太短（" + value.length + "），請確認貼上的是完整內容。";
 		return;
@@ -122,7 +149,7 @@ document.getElementById("f").addEventListener("submit", function (e) {
 	fetch("/api/consent", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ termsText: value })
+		body: JSON.stringify({ termsText: value, acknowledgements: ${JSON.stringify(REQUIRED_ACKNOWLEDGEMENTS)} })
 	}).then(function (r) { return r.json(); }).then(function (body) {
 		out.textContent = body && body.ok
 			? "已寫入，請重新載入："
@@ -208,7 +235,7 @@ export function readConsent(configPath) {
  * @param {string} termsText
  * @returns {Promise<string>} the absolute path that was written
  */
-export async function writeConsent(configPath, termsText) {
+export async function writeConsent(configPath, termsText, record = {}) {
   if (typeof configPath !== 'string' || configPath === '') {
     throw new Error('writeConsent: configPath 必須是檔案路徑');
   }
@@ -233,7 +260,7 @@ export async function writeConsent(configPath, termsText) {
   }
 
   // Other keys in the config file belong to other workstreams; keep them.
-  const payload = `${JSON.stringify({ ...readConfigObject(resolved), termsText: value }, null, 2)}\n`;
+  const payload = `${JSON.stringify({ ...readConfigObject(resolved), ...record, termsText: value }, null, 2)}\n`;
   const tmp = path.join(
     dir,
     `.${path.basename(resolved)}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`,
@@ -398,7 +425,23 @@ export function registerConsentRoutes(app, options) {
       );
     }
 
-    await writeConsent(configPath, value);
+    const acknowledged = /** @type {{ acknowledgements?: unknown }} */ (body).acknowledgements;
+    const given = new Set(Array.isArray(acknowledged) ? acknowledged : []);
+    const missingAcks = REQUIRED_ACKNOWLEDGEMENTS.filter((id) => !given.has(id));
+    if (missingAcks.length > 0) {
+      return fail(
+        'EACK',
+        `缺少必要確認：${missingAcks.join(', ')}。請在同意頁逐項勾選；` +
+          '用 curl 時請送 { "termsText": "…", "acknowledgements": ' +
+          `${JSON.stringify(REQUIRED_ACKNOWLEDGEMENTS)} }（先讀 NOTICE.md）。`,
+      );
+    }
+
+    await writeConsent(configPath, value, {
+      acknowledgements: [...REQUIRED_ACKNOWLEDGEMENTS],
+      noticeVersion: CONSENT_NOTICE_VERSION,
+      acknowledgedAt: new Date().toISOString(),
+    });
     onAccepted();
     return reply.type('application/json; charset=utf-8').send({ ok: true });
   });

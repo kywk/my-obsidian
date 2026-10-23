@@ -19,6 +19,8 @@ import {
   createConsentState,
   defaultConfigPath,
   readConsent,
+  REQUIRED_ACKNOWLEDGEMENTS,
+  CONSENT_NOTICE_VERSION,
   withConsentTerms,
   writeConsent,
 } from '../src/consent.js';
@@ -407,15 +409,39 @@ describe('GET / and /obsidian/app.js follow the live consent state', () => {
     assert.match(notJson.json().error.message, /JSON/);
   });
 
+  it('refuses a valid string without every acknowledgement', async () => {
+    const none = await app.inject({
+      method: 'POST',
+      url: '/api/consent',
+      payload: { termsText: ACK },
+    });
+    assert.equal(none.statusCode, 400);
+    assert.equal(none.json().error.code, 'EACK');
+    assert.match(none.json().error.message, /unofficial/);
+
+    const partial = await app.inject({
+      method: 'POST',
+      url: '/api/consent',
+      payload: { termsText: ACK, acknowledgements: ['unofficial', 'obsidian-terms'] },
+    });
+    assert.equal(partial.statusCode, 400);
+    assert.match(partial.json().error.message, /private-use/);
+    assert.equal(fs.existsSync(configPath), false, 'a refused post must not write the file');
+  });
+
   it('accepts the value, and both routes follow without a restart', async () => {
     const accepted = await app.inject({
       method: 'POST',
       url: '/api/consent',
-      payload: { termsText: ` ${ACK}\n` },
+      payload: { termsText: ` ${ACK}\n`, acknowledgements: [...REQUIRED_ACKNOWLEDGEMENTS] },
     });
     assert.equal(accepted.statusCode, 200);
     assert.deepEqual(accepted.json(), { ok: true });
     assert.deepEqual(readConsent(configPath), { termsText: ACK });
+    const stored = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    assert.deepEqual(stored.acknowledgements, [...REQUIRED_ACKNOWLEDGEMENTS]);
+    assert.equal(stored.noticeVersion, CONSENT_NOTICE_VERSION);
+    assert.ok(!Number.isNaN(Date.parse(stored.acknowledgedAt)));
 
     // Same app instance as the 403 above: no restart happened.
     const appJs = await app.inject({ method: 'GET', url: '/obsidian/app.js' });

@@ -711,7 +711,7 @@
 				"檔案：" + (path || "(未知)") + "\n" +
 				"保留的副本：" + savedAs + "\n" +
 				"時間：" + new Date(value.at || now()).toISOString() + "\n\n" +
-				"這個副本是外部寫入者（Desktop Obsidian、Dropbox/Maestral、git 或手動編輯）" +
+				"這個副本是外部寫入者（Desktop Obsidian、Dropbox 等同步工具、git 或手動編輯）" +
 				"與瀏覽器寫入競爭時保留的舊版。若要找回內容，請開啟該副本。",
 			dedupeKey: conflictKey(value),
 			actions: actions

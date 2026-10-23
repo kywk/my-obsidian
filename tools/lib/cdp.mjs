@@ -16,8 +16,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { findChrome } from '../../scripts/lib/browser.mjs';
+
 export const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
-export const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+// Resolved lazily-failing: a machine without Chrome can still import this
+// module (the unit tests do); launchChrome() reports what to install or set.
+export const CHROME = findChrome();
 
 /**
  * The operator's real vault. Harnesses write into the vault they are pointed
@@ -250,6 +254,12 @@ export class Cdp {
  * @returns {Promise<{ child: import('node:child_process').ChildProcess, userDataDir: string, wsUrl: string }>}
  */
 export async function launchChrome(port) {
+  if (!CHROME) {
+    throw new Error(
+      '找不到 Chromium 系瀏覽器（Chrome／Chromium／Edge／Brave）。' +
+        '請安裝其中之一，或設 MYOBS_CHROME=<可執行檔絕對路徑>。',
+    );
+  }
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'myobs-chrome-'));
   const child = spawn(
     CHROME,

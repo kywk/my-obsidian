@@ -26,7 +26,7 @@ Node（Fastify）
 | 事實 | 值 |
 |---|---|
 | 功能 baseline | `e11953a`（2026-10-24，自動信任與收合選單） |
-| 單元測試 | **334/334** |
+| 單元測試 | **335/335** |
 | 端到端 harness | **21 支 / 239 項斷言**（`check:spike` 10 項） |
 | Node | 22；server 與 shim 都是 **plain JavaScript，無 build step** |
 | renderer | Obsidian 1.14.4，`app.js` 3,942,126 bytes，由 `npm run vendor` 產生 |
@@ -39,11 +39,11 @@ Node（Fastify）
 ```bash
 npm --prefix packages/server ci          # 1. 安裝 server 依賴
 npm run doctor -- --vault <vault-copy>  # 2. 環境檢查
-npm test                                # 3. 334/334
+npm test                                # 3. 335/335
 npm run dev -- --vault <vault-copy>     # 4. http://127.0.0.1:3000/（跳過同意畫面）
 ```
 
-**完成判準**：上述指令都成功、`npm test` 334/334、app 能 boot 且沒有全螢幕 fatal。
+**完成判準**：上述指令都成功、`npm test` 335/335、app 能 boot 且沒有全螢幕 fatal。
 完整 21 支 harness 與乾淨複本規則見 `docs/HANDOFF.md`〈驗證接手狀態〉。
 
 > `--dev` 只允許 loopback；它從 `vendor/obsidian/app.js` 讀出字串注入 renderer，
@@ -56,6 +56,7 @@ npm run dev -- --vault <vault-copy>     # 4. http://127.0.0.1:3000/（跳過同�
 | 你要做的事 | 先讀 |
 |---|---|
 | 了解專案是什麼、怎麼跑、限制 | `README.md` |
+| Obsidian 所有權、條款、免責（改動同意畫面前必讀） | `NOTICE.md` |
 | 接手、跑全部驗收、看目前數字 | `docs/HANDOFF.md` |
 | 改 server ↔ shim 的接縫、錯誤碼、header | `docs/CONTRACTS.md` |
 | 改 `fs` 語意或查 shim 已知落差 | `packages/shim/GAPS.md` |
@@ -85,7 +86,7 @@ npm run dev -- --vault <vault-copy>     # 4. http://127.0.0.1:3000/（跳過同�
    harness 的 `MYOBS_LIVE_VAULT` 守門是 **fail-closed**，但那是輔助；每支 harness
    請用獨立複本，`attachment` 會留 fixture、`menu`/`popout` 會改 workspace。
 
-5. **不在 server 執行任何 git 指令。** vault 可能同時被 Dropbox／Maestral 之類的同步工具
+5. **不在 server 執行任何 git 指令。** vault 可能同時被 Dropbox 之類的同步工具
    與 git 管理；服務不得成為第三個競爭者。
 
 6. **不上前端 bundler。** shim 必須在 Obsidian 的 `app.js` 之前以 classic script 生效。
@@ -119,7 +120,7 @@ npm --prefix packages/server ci          # 第一次或 package-lock 變更後
 npm run doctor -- --vault <copy>         # 環境檢查
 npm run dev -- --vault <copy>            # 本地開發；loopback、跳過同意畫面
 npm start -- --vault <copy>              # 正常模式；第一次需完成同意畫面
-npm test                                 # 334 個單元測試
+npm test                                 # 335 個單元測試
 ```
 
 Harness（全部只對複本；先設 `MYOBS_LIVE_VAULT`）：
@@ -137,7 +138,7 @@ npm run check:popout -- --vault <copy>   # 10 項
 
 任何程式碼改動至少要通過：
 
-1. `npm test` **334/334** 全綠（測試只使用暫存目錄）
+1. `npm test` **335/335** 全綠（測試只使用暫存目錄）
 2. 若改動涉及 renderer boot、shim、runtime 或 server 接縫：`npm run check:spike` **10/10**
 3. 交付前跑**全部 21 支 harness**，每支回報 `passed: true`；`plugin-install` 需要真實網路
 4. 每支 harness 用一份**乾淨 vault 複本**；`MYOBS_LIVE_VAULT` 必須指向真實 vault

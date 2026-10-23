@@ -33,7 +33,7 @@ shim 的已知落差查 **`packages/shim/GAPS.md`**。 外掛工作另讀 **`doc
 
 ```bash
 npm --prefix packages/server ci
-npm test                                  # 334/334
+npm test                                  # 335/335
 export MYOBS_LIVE_VAULT=/path/to/real-vault
 npm run check:spike -- --vault <copy>     # 10/10
 npm run dev -- --vault <copy>             # 另開終端；app 能 boot、沒有 fatal
@@ -48,7 +48,7 @@ npm run dev -- --vault <copy>             # 另開終端；app 能 boot、沒有
 - 程式與驗收基準：`e11953a`；本輪自 `d533185` 起分組提交自動信任與收合選單，最新版本以 `git log -1` 為準
 - 程式、測試與驗收工具已納入版控；檔案清單以 `git ls-files` 為準，後續變更查 `git status --short`
 - Node 22；server 與 shim 都是 **plain JavaScript，沒有 build step**
-- 334 個單元測試 + **21 支零依賴 CDP harness**（239 項斷言；`check:spike` 10 項）
+- 335 個單元測試 + **21 支零依賴 CDP harness**（239 項斷言；`check:spike` 10 項）
 - renderer 是**未修改**的官方 Obsidian 1.14.4（`app.js` 3,942,126 bytes），
   由 `npm run vendor` 在操作者機器上解包，`vendor/` 不進版控
 - 每次 boot 自動信任目前 vault；不改個別外掛啟用清單；`check:plugin-trust` 6 項驗全新 origin 與既有 false 設定
@@ -87,7 +87,7 @@ BASE=/tmp/vault-copy && mkdir -p "$BASE"
 rsync -a --exclude='.git/' --exclude='.docusaurus/' --exclude='node_modules/' \
   "$MYOBS_LIVE_VAULT/" "$BASE/"
 
-npm test                                  # 334/334
+npm test                                  # 335/335
 
 # 每支 harness 一份乾淨複本。attachment 會留 fixture；menu/popout 會改
 # workspace-server.json。共用一份會讓後面的 harness 繼承前一棒的狀態。

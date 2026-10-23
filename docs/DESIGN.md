@@ -85,7 +85,7 @@ my-obsidian/
 
 | # | 決策 | 結論 |
 |---|---|---|
-| 1 | 交付架構 | 網頁原生客戶端，重用**官方 desktop bundle**（非 mobile bundle）；目標是 Desktop 版 UI 語意 || 2 | Renderer 來源與版本 | 本機 `/Applications/Obsidian.app/Contents/Resources/obsidian.asar`，版本跟隨安裝版（1.14.4）；`scripts/fetch-obsidian.mjs` 取得 |
+| 1 | 交付架構 | 網頁原生客戶端，重用**官方 desktop bundle**（非 mobile bundle）；目標是 Desktop 版 UI 語意 || 2 | Renderer 來源與版本 | 使用者本機已安裝的 Obsidian：自動偵測 `/Applications`、`~/Applications` 與 `~/Library/Application Support/obsidian/obsidian-<版本>.asar`（自動更新後的新版在這裡），取最高版本；已驗證 1.14.4，其他版本警告；`scripts/fetch-obsidian.mjs` 取得 |
 | 3 | `terms` 閘 | **首啟同意畫面**：使用者本人按下同意 → 存 server config → 注入 `sendSync("terms")`。**程式碼不內建該字串**。未同意則拒絕啟動並顯示明確錯誤（不可停在白色載入動畫） |
 | 4 | MVP 驗收邊界 | 編輯／預覽、檔案樹、分頁與分割、搜尋、標籤／反向連結、圖譜、Canvas、命令面板、核心 plugin 全數、社群 plugin 可安裝啟用、主題／片段 |
 | 5 | 桌面專屬功能 | **MVP 要，已實作**：多視窗 popout（§11.8）、自繪選單列＋右鍵選單（§11.9）、列印 PDF（§11.10）、平板／桌面版面（§11.11）。**降級**：外部 App 開啟（檔案→下載）、`obsidian://`→ web URL。**不做**：全域快捷鍵、系統匣、CLI、Sync/Publish |
@@ -95,9 +95,9 @@ my-obsidian/
 | 9 | 專案落點 | 本 repo，獨立 git repo |
 | 10 | 與 Markport 的關係 | **不 fork、不引入程式碼**（GPL-3.0 會綁住產品方向）。僅閱讀其 `archive/desktop-runtime` tag 作為參考，結論寫進本文件並標註出處 |
 | 11 | Plugin 安裝流程 | **已實作**：`GET /api/proxy`（server 端 allowlist + SSRF 防護）、`POST /api/plugins/install`（temp+rename 原子替換、驗 digest、保留 `data.json`）、`POST /api/plugins/uninstall`（移到 `.trash`，不覆蓋）。詳見 §11.12 |
-| 12 | 同步拓撲 | MVP 預設與 vault 同機（Maestral 已在跑）；server 不主動執行任何 git 指令 |
+| 12 | 同步拓撲 | MVP 預設與 vault 同機（雲端同步工具照常運作）；server 不主動執行任何 git 指令 |
 | 13 | 目標 UI 形態 | 桌機與平板為預設；>= 600px 維持桌面／平板版面，< 600px 才降級手機版面（§11.11，手機非支援目標）；PWA manifest 有，service worker **只快取靜態資產，絕不快取 vault 內容**（`/api/fs`、`/api/watch`、`/v/*`、`/obsidian/app.js` 全排除） |
-| 14 | 外部變更監控 | **服務啟動即監控（來源不限）**：Maestral/Dropbox、Desktop Obsidian、git、手動編輯 |
+| 14 | 外部變更監控 | **服務啟動即監控（來源不限）**：雲端同步（Dropbox 等）、Desktop Obsidian、git、手動編輯 |
 | 15 | `/api/fs` 契約 | 單一 `POST /api/fs`（`{op, path, args}`）+ `ifMtimeMs` 條件寫入；大檔走 `GET/PUT /v/<id>/<path>` |
 | 16 | WS 推播 | `awaitWriteFinish` + 150ms 批次聚合 + write-token 回音過濾 + `WATCH_DISABLED` 開關 |
 | 17 | Plugin `require` 白名單 | 見 §7 |
@@ -167,7 +167,7 @@ Obsidian 的 `write()` 不是原子寫入（無 temp+rename），因此：
 | `child_process` / `node:child_process` | 可匯入 refusal facade；exec／spawn 等全部同步拋 `MODULE_NOT_SUPPORTED`，附操作名稱與通知；沒有 server RPC |
 | `net`、`worker_threads` 等特權模組 | 匯入即明確拋錯，不提供伺服器執行權限 |
 
-### 對照本人 vault（20 個已安裝 plugin）
+### 對照開發者的 vault（20 個已安裝 plugin；僅作初期盤點樣本）
 
 需要 Node／Electron 的只有 5 個：`kanban`(path, electron)、`auto-link-title`(electron)、
 `brat`(os)、`templater`(child_process, util)。這是初期盤點；2026-10-24 新盤點見 `PLUGINS.md`。
@@ -177,6 +177,11 @@ Templater 純 JavaScript user scripts 已驗收；system commands 仍拒絕，�
 ---
 
 ## 8. `terms` 閘
+
+> 使用者端的條款、所有權與免責見根目錄 `NOTICE.md`；同意畫面另要求逐項確認
+> （`REQUIRED_ACKNOWLEDGEMENTS`：unofficial／obsidian-terms／private-use／own-risk），
+> server 端同樣強制，缺項回 400 `EACK`，並把項目、時間與 `noticeVersion` 記進 config。
+> 改動聲明文字時同步更新 `CONSENT_NOTICE_VERSION`。
 
 1.13+ 的 renderer 會在 boot 期向宿主索取一份聲明字串，並與自己內建的那份逐字比對；
 不符就中止啟動。兩個通道的行為（本專案只走前者）：
@@ -851,3 +856,20 @@ nativeVirtualKeyCode，會讓 macOS Chrome 後續滑鼠回應延遲、resize 事
 單獨 resize 正常，完整鍵盤序列卻失敗。保留 key／code／windowsVirtualKeyCode、
 省略不正確的 native 欄位後，同順序四項檢查通過。驗收應等實際收合與 viewport 復原，
 不能只等固定 sleep；Alt+click 的 DOM 取消判定另外重播，避免引入無關的瀏覽器原生手勢。
+
+### 11.31 Obsidian 自動更新後，.app 內的 renderer 不是實際執行的那份
+
+Obsidian 的更新器把新版 renderer 放在 `~/Library/Application Support/obsidian/obsidian-<版本>.asar`，
+`/Applications/Obsidian.app/Contents/Resources/obsidian.asar` 本身不變。只讀 .app 路徑會讓每個
+自動更新過的使用者解出舊版；寫死版本與 app.js 位元組數則讓任何其他版本在 doctor 被判定損毀。
+
+處置：`fetch-obsidian.mjs` 掃描所有候選位置、只讀 asar header 與 package.json 探測版本、取最高者；
+doctor 改比對 `vendor/obsidian.manifest.json` 記錄的 app.js sha256，不綁特定版本，
+並對「已驗證版本」以外警告。已驗證清單在 `fetch-obsidian.mjs` 與 `start.mjs` 的
+`TESTED_VERSIONS`，驗收新版本後兩處一起更新。1.14.5 已存在於開發機，尚未跑 harness。
+
+### 11.32 同意畫面不只收字串，也收逐項確認
+
+字串只證明操作者拿得到 renderer 的聲明；不證明他知道本專案非官方、不得對他人提供、
+風險自負。四項確認由 `REQUIRED_ACKNOWLEDGEMENTS` 定義，頁面與 server 都強制，
+直接 POST 缺項也會被拒（400 `EACK`），避免只靠前端勾選。

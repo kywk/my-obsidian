@@ -2,14 +2,22 @@
 
 在瀏覽器裡執行**官方 Obsidian renderer（未修改）**，由自架 Node 服務提供 vault 檔案 API。
 
-跑的是 Obsidian 自己的 `app.js`（1.14.4、3,942,126 bytes，與官方釋出檔位元組相同），
+[English README is available here](README.en.md)
+
+跑的是你自己已安裝的 Obsidian 的 `app.js`（位元組與官方釋出檔相同），
 外面的 Electron／Node 依賴由 13 個 shim 取代。不是重寫的編輯器，也不是遠端桌面串流。
 
 ```
-Obsidian 1.14.4 · Node 22 · 334 個單元測試 · 21 支端到端 harness（239 項斷言）
+已驗證 Obsidian 1.14.4 · macOS · Node 22 · 335 個單元測試 · 21 支端到端 harness
 ```
 
-> **Agent 入口**：`AGENTS.md`（硬規則與文件路由）→ `docs/HANDOFF.md`（接手驗證）→
+> **⚠️ 非官方專案，與 Obsidian 無任何關係。**
+> Obsidian 的程式碼、名稱與商標**全部屬於 Obsidian**；本 repo **不包含、不散布**任何 Obsidian 程式碼，
+> renderer 由你在自己的機器上從已安裝的官方 Obsidian 取得。**設計給你自己在自己的機器、自己的 vault 使用**；
+> 對他人提供服務需要 Obsidian 的明示同意。軟體依 MIT「現狀」提供、不附保證，**使用前請先備份 vault**。
+> 完整內容見 **[`NOTICE.md`](NOTICE.md)**。
+
+> **開發者／Agent 入口**：`AGENTS.md`（硬規則與文件路由）→ `docs/HANDOFF.md`（接手驗證）→
 > `docs/DESIGN.md` §11（陷阱）。線路契約查 `docs/CONTRACTS.md`；shim 已知落差查
 > `packages/shim/GAPS.md`。
 
@@ -25,9 +33,9 @@ Obsidian 1.14.4 · Node 22 · 334 個單元測試 · 21 支端到端 harness（2
 - [能做什麼](#能做什麼)
 - [做不到什麼](#做不到什麼)
 - [疑難排解](#疑難排解)
-- [授權聲明](#授權聲明)
+- [授權與免責](#授權與免責)
 - [專案結構](#專案結構)
-- [驗收](#驗收)
+- [驗收（開發者）](#驗收開發者)
 - [延伸閱讀](#延伸閱讀)
 
 ---
@@ -36,8 +44,8 @@ Obsidian 1.14.4 · Node 22 · 334 個單元測試 · 21 支端到端 harness（2
 
 | | |
 |---|---|
-| **是** | 一個 Node 服務，把指定 vault 變成可線上存取／編輯的網頁應用，UI 與外掛生態跟桌面版同一套 |
-| **不是** | 重寫的 markdown 編輯器；用 UI 框架拼出來的「類 Obsidian」；VNC 遠端桌面 |
+| **是** | 一個 Node 服務，把指定 vault 變成可在瀏覽器存取／編輯的網頁應用，UI 與外掛生態跟桌面版同一套 |
+| **不是** | 重寫的 markdown 編輯器；用 UI 框架拼出來的「類 Obsidian」；VNC 遠端桌面；Obsidian 官方產品 |
 
 差別在於：你拿到的所有功能都是 Obsidian 自己的實作，我們只負責把宿主環境（檔案、選單、視窗、剪貼簿、列印、外掛載入）補起來。
 
@@ -45,71 +53,95 @@ Obsidian 1.14.4 · Node 22 · 334 個單元測試 · 21 支端到端 harness（2
 
 ## 快速開始
 
+### 前置需求
+
+- **macOS**（目前唯一支援的平台；Windows／Linux 尚未驗證）
+- **已安裝官方 Obsidian 桌面版**（<https://obsidian.md>），並至少開啟過一次
+- **Node.js 22+**
+- 一個 Obsidian vault（或空目錄，Obsidian 會自己建 `.obsidian/`）
+- 瀏覽器：Chrome、Edge、Safari 以外請先自行測試；跑 `npm run check:*` 才需要 Chromium 系瀏覽器
+
+> **先備份你的 vault**，或先指向一份副本試用。服務對 vault 有完整讀寫權限。
+
+### 步驟
+
 ```bash
 # 1. 安裝 server 依賴
 npm --prefix packages/server ci
 
 # 2. 取得 Obsidian renderer
-#    預設從本機已安裝的 /Applications/Obsidian.app 解包（--from 可指定 .asar）
+#    自動偵測你已安裝的 Obsidian（含自動更新後的版本）並解包到 vendor/
 npm run vendor
 
 # 3. 檢查環境（會逐項告訴你缺什麼、要跑哪個指令）
-npm run doctor -- --vault ~/my-vault
+npm run doctor -- --vault /path/to/your-vault
 
 # 4. 啟動
-npm start -- --vault ~/my-vault
+npm start -- --vault /path/to/your-vault
 
-# 5. 開 http://127.0.0.1:3000/
+# 5. 開 http://127.0.0.1:3000/，依畫面閱讀聲明並完成確認
 ```
+
+`--vault` 也可以用環境變數 `MYOBS_VAULT` 取代，並支援 `~` 開頭的路徑。
+
+### 版本相容性
+
+shim 只驗證過 **Obsidian 1.14.4**。`npm run vendor` 與 `npm run doctor` 遇到其他版本會警告：
+多數小版本可以正常啟動，但不保證；Obsidian 自動更新後若無法開機，請回報 issue 並附上版本號
+（`vendor/obsidian/package.json` 的 `version`）。需要指定來源時：
+
+```bash
+npm run vendor -- --from /path/to/obsidian.asar     # 或 OBSIDIAN_ASAR=/path/to/obsidian.asar
+```
+
+偵測順序：`/Applications`、`~/Applications` 的 Obsidian.app，以及
+`~/Library/Application Support/obsidian/obsidian-<版本>.asar`；取其中**版本最高**者。
 
 ### 常用參數
 
 ```bash
-npm start -- --vault ~/my-vault --port 8080
-npm start -- --vault ~/my-vault --host 0.0.0.0 --auth-token "$(openssl rand -hex 24)"
-npm start -- --vault ~/my-vault --no-watch      # 關掉檔案監看（debug 用）
-npm run dev -- --vault ~/my-vault               # 本地開發：跳過同意畫面（只允許 loopback）
-npm start -- --vault ~/my-vault --dev           # 同上
+npm start -- --vault <path> --port 8080
+npm start -- --vault <path> --host 0.0.0.0 --auth-token "$(openssl rand -hex 24)"   # 見〈安全性〉
+npm start -- --vault <path> --no-watch      # 關掉檔案監看（debug 用）
+npm run dev -- --vault <path>               # 開發用：跳過同意畫面（只允許 loopback）
 ```
-
-### 前置需求
-
-- Node.js **22+**
-- 一個 Obsidian vault（或空目錄，Obsidian 會自己建 `.obsidian/`）
-- 想跑 `npm run check:*` 的話需要本機 Chrome（harness 用它做端到端驗證）
 
 ---
 
 ## 第一次啟動會看到什麼
 
-**同意畫面。** Obsidian 1.13 之後的 renderer 會在啟動時向宿主索取一段聲明字串，逐字比對，不符就中止。
-本專案**不內建該字串**（詳見[授權聲明](#授權聲明)）。
+**同意畫面。** 它包含兩件事：
 
-畫面上會給你取出該字串的指令，由你貼上並確認，之後寫進
-`~/.config/my-obsidian/config.json`（權限 0600）。在那之前 `/obsidian/app.js` 回 403。
-確認後**立即生效，不需重啟**。
+1. **逐項確認四個重點**：這是非官方專案、你接受 Obsidian 自己的條款、你只自用不對他人提供、軟體不附保證且風險自負。
+   全部勾選前無法送出。
+2. **貼上 renderer 要求的聲明字串。** Obsidian 1.13 之後的 renderer 會在啟動時向宿主索取一段聲明字串，
+   逐字比對，不符就中止。本專案**不內建該字串**（詳見[授權與免責](#授權與免責)）：
+   畫面上會給你取出該字串的指令，由你貼上並確認。
+
+確認後寫進 `~/.config/my-obsidian/config.json`（權限 0600；同時記錄你勾選的項目、時間與聲明版本），
+**立即生效，不需重啟**。在那之前 `/obsidian/app.js` 回 403。
 
 完成後就是完整的 Obsidian。vault 裡只會多一個檔案：`.obsidian/workspace-server.json`
 （與桌面版的 `workspace.json` 分開存放，互不干擾）。
 
-### 本地開發：`--dev`
+### 開發模式：`--dev`
 
 ```bash
-npm run dev -- --vault ~/my-vault
-# 或 npm start -- --vault ~/my-vault --dev
+npm run dev -- --vault <path>
 ```
 
 `--dev` 會**跳過同意畫面**：server 在啟動時從 `vendor/obsidian/app.js` 讀出字串，
-只存在記憶體並注入 renderer，不寫入 config、也不輸出到 log。
+只存在記憶體並注入 renderer，不寫入 config、也不輸出到 log。**這是給本專案開發者的捷徑，
+一般使用者請走正常流程**；使用 `--dev` 不會免除 [`NOTICE.md`](NOTICE.md) 的任何責任。
 
 限制：**只允許 loopback**（`127.0.0.1`、`::1`、`localhost`）。搭配
-`--host 0.0.0.0` 或反向代理對外會直接拒絕啟動。這是方便本機開發，不是對外服務的模式。
+`--host 0.0.0.0` 或反向代理對外會直接拒絕啟動。
 
 ---
 
 ## 日常使用
 
-**外部變更會即時反映。** Maestral／Dropbox、另一台機器開著的 Obsidian、`git checkout`、
+**外部變更會即時反映。** 雲端同步工具（Dropbox、iCloud 等）、另一台機器開著的 Obsidian、`git checkout`、
 手動編輯 —— 服務啟動後就開始監看：
 
 | 變更 | 行為 |
@@ -160,14 +192,14 @@ npm run dev -- --vault ~/my-vault
 - **外部變更熱重載**、**衝突副本提示**、**斷線偵測與重連補償**
 - 桌面與平板優先的版面（>=600px 維持 Obsidian 桌面／平板版面；<600px 才是手機 fallback）、PWA 可加到主畫面
 
-實測基準（作者的本機 vault，10,150 檔 / 341 MB）：
+參考數字（約 1 萬檔 / 340 MB 的大型 vault，Apple Silicon Mac；你的結果會因硬體與 vault 而異）：
 
 | 項目 | 數字 |
 |---|---|
 | 冷啟 | **≈ 510 ms** |
 | 全 vault 掃描 + metadata cache | ≈ 1 秒（19,000+ 次 fs 請求，0 失敗） |
 | 重連後 reconcile | ≈ 4.2 秒（10,036 檔） |
-| 社群外掛初始化（2026-10-24） | 15 個已啟用：15 成功、0 失敗；逐項見 `docs/PLUGINS.md` |
+| 社群外掛初始化 | 15 個已啟用：15 成功、0 失敗；逐項見 `docs/PLUGINS.md` |
 
 ## 做不到什麼
 
@@ -191,36 +223,47 @@ npm run dev -- --vault ~/my-vault
 
 | 症狀 | 原因 | 處理 |
 |---|---|---|
-| `/obsidian/app.js` 回 403、看不到 app | 尚未完成授權聲明確認 | 開 `/` 完成同意畫面 |
-| 卡在載入畫面 | 聲明字串不符，或 vault 路徑不可讀 | 畫面上會有全螢幕錯誤與具體原因 |
+| `npm run vendor` 說找不到 Obsidian | 未安裝，或不在預設位置 | 先安裝官方 Obsidian 並開啟一次；或 `--from <obsidian.asar>` |
+| 警告「Obsidian x.y.z 尚未驗證」 | 你的版本比已驗證版本新 | 通常仍可用；無法開機請回報 issue 並附版本號 |
+| `doctor` 說 vendor 雜湊與 manifest 不符 | 解包不完整或被改動 | `npm run vendor -- --force` |
+| `/obsidian/app.js` 回 403、看不到 app | 尚未完成同意畫面 | 開 `/` 完成確認 |
+| 卡在載入畫面 | 聲明字串不符，或 vault 路徑不可讀；常見於 Obsidian 更新後 renderer 的聲明改了 | 畫面上會有全螢幕錯誤；重新 `npm run vendor` 後，刪除 `~/.config/my-obsidian/config.json` 再走一次同意畫面 |
 | 伺服器啟動就退出 | 沒給 `VAULT_PATH`，或 `vendor/` 不存在 | `npm run doctor` |
-| harness 說 `MYOBS_LIVE_VAULT is not set` | 這是 fail-closed 守門，不是錯誤 | 設成你的真實 vault，再指向複本 |
-| 所有社群外掛都沒載入（無錯誤訊息） | `policy` 注入不完整 | 已修；若復發見 `DESIGN.md` §11.3 |
-| 附件（圖片／PDF）全部 404 | `file-url` 回錯來源 | 已修；見 `DESIGN.md` §11.7 |
 | 外掛熱重載沒反應 | 被關掉了 | 移除 `localStorage["myobs-plugin-watch"]` |
 | 通知卡在畫面上不消失 | `error` 等級**刻意**不自動消失 | 手動關閉 |
 | 存檔失敗並說「沒有存到磁碟」 | 後端離線 | 確認 server 是否在跑；恢復後會自動重連 |
+| `check:*` 說找不到瀏覽器 | 沒有 Chromium 系瀏覽器 | 安裝 Chrome，或 `MYOBS_CHROME=<可執行檔路徑>` |
+| `check:*` 說 `MYOBS_LIVE_VAULT is not set` | fail-closed 守門，不是錯誤 | 設成你的真實 vault，再指向複本 |
 
 ---
 
-## 授權聲明
+## 授權與免責
 
-Obsidian 不是開源軟體。1.13 之後的 renderer 會在啟動時比對一段聲明字串：
+> 完整條文見 **[`NOTICE.md`](NOTICE.md)**。以下是重點。
 
-- **本專案不內建該字串**，也不代替你按下同意。它由你本人從 `vendor/obsidian/app.js` 取出、貼上、確認。
-- **本專案不包含也不散布** Obsidian 的程式碼：`vendor/` 由 `npm run vendor` 在你的機器上
-  從你已安裝的 Obsidian 取得，且不進版控。
-- **界線**：把 renderer 送進他人的瀏覽器，在字面上就落在該聲明的射程內。
-  私有自用（自己的機器、自己的 vault）與對外提供服務是兩件不同的事，
-  後者需要 Obsidian team 的明示同意。這個判斷由操作者承擔。
+**Obsidian 屬於 Obsidian。**
 
-> **與 Obsidian 無隸屬關係。** 本專案不是 Obsidian 的官方產品，也未獲其背書。
-> Obsidian 是 Dynalist Inc. 的註冊商標；專案名稱僅作描述之用。
+- 本專案**與 Obsidian 無隸屬、贊助或背書關係**，是獨立的第三方專案。
+  Obsidian 的程式碼、名稱、標誌、商標與著作權全部屬於其權利人（Obsidian／Dynalist Inc.）；
+  專案名稱僅用於描述相容對象。
+- 本專案**不包含也不散布** Obsidian 的程式碼：`vendor/` 由 `npm run vendor` 在你的機器上，
+  從你自己已安裝的 Obsidian 取得，不進版控。**請不要把 `vendor/` 提交、打包或轉交他人。**
+- Obsidian 不是開源軟體，受其官方條款約束：<https://obsidian.md/terms>。**你必須自行閱讀並遵守。**
 
-本專案的原始碼以 **MIT** 授權釋出（見 [`LICENSE`](LICENSE)，© 2026 Yu Zhi Chen）。
+**聲明字串與用途界線。**
+
+- 1.13 之後的 renderer 會在啟動時比對一段聲明字串。**本專案不內建該字串**，也不代替你按下同意：
+  它由你本人從 `vendor/obsidian/app.js` 取出、貼上、確認；按下確認的人就是做出聲明的人。
+- **設計給你自己在自己的機器、自己的 vault 使用。** 把 renderer 送進他人的瀏覽器
+  （團隊共用、客戶、公開網站、託管服務），在字面上就落在該聲明的射程內，
+  **需要 Obsidian team 的明示同意**；這個判斷與責任由操作者承擔。
+
+**免責。** 本軟體以 MIT 授權、**「現狀」提供，不附任何保證**。作者與貢獻者不對任何損害或損失負責，
+包含 vault 資料的遺失或損毀。服務對 vault 有完整讀寫權限並會執行社群外掛：**請先備份**。
+
+本專案的原始碼以 **MIT** 授權釋出（見 [`LICENSE`](LICENSE)）。
 **MIT 只涵蓋本 repo 的程式碼**：Obsidian renderer 不在本 repo、也不隨本專案散布，
-它由 `npm run vendor` 在你的機器上取得，仍受 Obsidian 自己的條款約束。
-`vendor/` 底下的內容不適用 MIT。
+`vendor/` 底下的內容不適用 MIT，仍受 Obsidian 自己的條款約束。
 
 ---
 
@@ -240,11 +283,13 @@ packages/shim/GAPS.md  shim 的近似實作與已知落差
 vendor/obsidian/     gitignore；由 scripts/fetch-obsidian.mjs 產生
 ```
 
-## 驗收
+## 驗收（開發者）
+
+以下給要修改本專案的人；一般使用者不需要。
 
 ```bash
 npm --prefix packages/server ci # 第一次或 package-lock 變更後
-npm test                        # 單元測試（334 項）
+npm test                        # 單元測試（335 項）
 
 npm run check:spike           # boot / 無 installer 更新對話框 / 完整載入（與磁碟可見檔案數相符）/ metadata cache / 文字與二進位往返 / 冷啟 / 良性錯誤不蓋畫面
 npm run check:hotreload       # WS、筆記外部變更、plugin 熱重載、回音過濾

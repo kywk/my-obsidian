@@ -64,6 +64,10 @@
 	.muted { color: #8a8a93; font-size: 13px; }
 	a { color: #8ab4f8; }
 	.warn { border-left: 3px solid #e5c07b; padding-left: .85rem; }
+	fieldset.acks { border: 1px solid #2c2c31; border-radius: 10px; background: #18181b; padding: .9rem 1.1rem; margin: 1.1rem 0 0; }
+	fieldset.acks legend { padding: 0 .4rem; font-weight: 600; font-size: 13px; color: #e5c07b; }
+	label.ack { display: flex; gap: .6rem; align-items: flex-start; font-weight: 400; margin: .55rem 0; color: #d4d4d8; }
+	label.ack input { margin-top: .4rem; flex: none; }
 </style>
 </head>
 <body>
@@ -98,13 +102,43 @@
 	<p class="muted">同一件事用 Node 做（與 <code>tools/lib/cdp.mjs</code> 的取出方式相同）：</p>
 	<pre>node -e 'const fs=require("fs");const s=fs.readFileSync("vendor/obsidian/app.js","utf8");const at=s.indexOf(".ipcRenderer.sendSync(\"terms\")");const o=s.lastIndexOf("\"",at-2);const c=s.lastIndexOf("\"",o-1);process.stdout.write(s.slice(c+1,o))' | pbcopy</pre>
 
-	<h2>步驟二：貼上並確認</h2>
+	<h2>步驟二：閱讀並逐項確認</h2>
+	<div class="warn">
+		<p style="margin-top:0">
+			<strong>my-obsidian 不是 Obsidian。</strong>它與 Obsidian（Dynalist Inc.）沒有隸屬、
+			贊助或背書關係。Obsidian 的程式碼、名稱、商標與著作權<strong>全部歸 Obsidian 所有</strong>；
+			本專案只提供宿主環境，並<strong>不包含也不散布</strong>任何 Obsidian 程式碼——
+			renderer 是從你自己已安裝的官方 Obsidian 取得。
+		</p>
+		<p class="muted" style="margin-bottom:0">
+			完整說明見專案根目錄的 <code>NOTICE.md</code>。Obsidian 的條款以官方為準：
+			<a href="https://obsidian.md/terms" target="_blank" rel="noopener">obsidian.md/terms</a>。
+		</p>
+	</div>
+
 	<form id="consent-form" novalidate>
+		<fieldset class="acks" id="acks">
+			<legend>請逐項勾選（全部必選）</legend>
+			<label class="ack"><input type="checkbox" name="ack" value="unofficial">
+				我了解這是<strong>非官方</strong>的第三方專案，與 Obsidian 無隸屬或背書關係；
+				Obsidian 及其程式碼、商標歸原權利人所有。</label>
+			<label class="ack"><input type="checkbox" name="ack" value="obsidian-terms">
+				我已閱讀並接受 <strong>Obsidian 自己的條款</strong>，並理解下方貼上的聲明由我本人做出。</label>
+			<label class="ack"><input type="checkbox" name="ack" value="private-use">
+				我只在<strong>自己的機器、自己的 vault</strong> 使用；未經 Obsidian team 明示同意，
+				<strong>不會</strong>把 renderer 提供給其他人（含團隊、客戶、公開網站）。</label>
+			<label class="ack"><input type="checkbox" name="ack" value="own-risk">
+				我了解本軟體以<strong>現狀（AS IS）</strong>提供、<strong>不附任何保證</strong>；
+				它可讀寫並執行 vault 內容與社群外掛，備份與資料安全由我自行負責，
+				作者不對任何損失負責。</label>
+		</fieldset>
+
+		<h2>步驟三：貼上並確認</h2>
 		<label for="terms">聲明字串（貼上後請確認頭尾沒有多餘空白）</label>
 		<textarea id="terms" name="termsText" spellcheck="false" autocomplete="off"
 			placeholder="在此貼上 vendor/obsidian/app.js 內的字面值"></textarea>
 		<p class="muted" id="config-hint"></p>
-		<button type="submit" id="submit">我確認，並寫入設定檔</button>
+		<button type="submit" id="submit" disabled>我確認，並寫入設定檔</button>
 		<p class="msg msg-error" id="msg-error" hidden role="alert"></p>
 		<p class="msg msg-ok" id="msg-ok" hidden role="status"></p>
 	</form>
@@ -143,6 +177,16 @@
 	var statusLine = document.getElementById("status-line");
 	var statusDetail = document.getElementById("status-detail");
 	var configHint = document.getElementById("config-hint");
+	var ackBoxes = Array.prototype.slice.call(document.querySelectorAll("input[name=ack]"));
+
+	function ackValues() {
+		return ackBoxes.filter(function (b) { return b.checked; }).map(function (b) { return b.value; });
+	}
+	function syncSubmit() {
+		submit.disabled = ackValues().length !== ackBoxes.length;
+	}
+	ackBoxes.forEach(function (b) { b.addEventListener("change", syncSubmit); });
+	syncSubmit();
 
 	var data = readData();
 	var configPath = data && typeof data.configPath === "string" ? data.configPath : null;
@@ -227,11 +271,17 @@
 			return;
 		}
 
+		var acks = ackValues();
+		if (acks.length !== ackBoxes.length) {
+			showError("請先逐項勾選上方所有確認事項。");
+			return;
+		}
+
 		submit.disabled = true;
 		fetch("/api/consent", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ termsText: value })
+			body: JSON.stringify({ termsText: value, acknowledgements: acks })
 		}).then(function (response) {
 			return response.json().then(function (body) {
 				return { status: response.status, body: body };
@@ -256,7 +306,7 @@
 		}).catch(function (err) {
 			showError("送出失敗：" + (err && err.message ? err.message : String(err)));
 		}).then(function () {
-			submit.disabled = false;
+			syncSubmit();
 		});
 	});
 })();

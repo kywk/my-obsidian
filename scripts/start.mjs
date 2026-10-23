@@ -11,6 +11,7 @@
  *   node scripts/start.mjs --doctor [--vault ...]
  */
 
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -18,6 +19,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { isLoopbackHost } from '../packages/server/src/consent.js';
+import { findChrome } from './lib/browser.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SERVER_ENTRY = path.join(REPO_ROOT, 'packages/server/src/index.js');
@@ -80,13 +82,33 @@ function readConsent() {
   }
 }
 
+const TESTED_VERSIONS = ['1.14.4'];
+
 function checkVendor() {
   const appJs = path.join(VENDOR_DIR, 'app.js');
   if (!fs.existsSync(appJs)) return { ok: false, reason: 'vendor/obsidian/app.js 不存在' };
-  const size = fs.statSync(appJs).size;
-  // 3,942,126 is the shipped 1.14.4 size; a mismatch means a partial or patched
-  // extraction, which is exactly what AGENTS.md hard rule 1 forbids.
-  return { ok: size === 3942126, size, expected: 3942126, version: readVendorVersion() };
+  const buf = fs.readFileSync(appJs);
+  const version = readVendorVersion();
+  // Compare against the hash recorded when the bundle was extracted: a mismatch
+  // means a partial or patched extraction, which AGENTS.md hard rule 1 forbids.
+  // Not tied to one release, so any installed Obsidian version can pass.
+  let expected = null;
+  try {
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(REPO_ROOT, 'vendor/obsidian.manifest.json'), 'utf8'),
+    );
+    expected = manifest.hashes?.['app.js'] ?? null;
+  } catch {
+    // Missing manifest is reported as "cannot verify".
+  }
+  const actual = createHash('sha256').update(buf).digest('hex');
+  return {
+    ok: expected !== null && actual === expected,
+    size: buf.length,
+    version,
+    verified: expected !== null,
+    tested: version !== null && TESTED_VERSIONS.includes(version),
+  };
 }
 
 function readVendorVersion() {
@@ -108,10 +130,16 @@ function runDoctor(args) {
 
   const vendor = checkVendor();
   if (vendor.ok) {
-    lines.push(`vendor      OK（Obsidian ${vendor.version ?? '?'}，app.js ${vendor.size} bytes）`);
+    lines.push(`vendor      OK（Obsidian ${vendor.version ?? '?'}，app.js ${vendor.size} bytes，雜湊與 manifest 一致）`);
+    if (!vendor.tested) {
+      notes.push(
+        `Obsidian ${vendor.version ?? '?'} 尚未驗證（已驗證：${TESTED_VERSIONS.join(', ')}）；` +
+          '若無法開機，請回報 issue 並附上版本號',
+      );
+    }
   } else if (vendor.size !== undefined) {
-    lines.push(`vendor      app.js ${vendor.size} bytes（預期 ${vendor.expected}）`);
-    problems.push('vendor/obsidian/app.js 大小不符 → 重跑 `npm run vendor -- --force`');
+    lines.push(`vendor      app.js ${vendor.size} bytes（${vendor.verified ? '雜湊與 manifest 不符' : '缺少 manifest，無法驗證'}）`);
+    problems.push('vendor 無法驗證完整性 → 重跑 `npm run vendor -- --force`');
   } else {
     lines.push('vendor      缺少');
     problems.push('尚未取得 Obsidian renderer → 執行 `npm run vendor`');
@@ -156,8 +184,14 @@ function runDoctor(args) {
     lines.push('server deps OK');
   }
 
-  const chrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-  lines.push(`chrome      ${fs.existsSync(chrome) ? 'OK（工具脚本需要）' : '找不到（只有 tools/ 底下的驗收脚本需要）'}`);
+  const chrome = findChrome();
+  lines.push(
+    `chrome      ${chrome ? `OK（${chrome}；僅驗收腳本需要）` : '找不到（只有 tools/ 底下的驗收腳本需要；可設 MYOBS_CHROME）'}`,
+  );
+
+  if (process.platform !== 'darwin') {
+    notes.push(`目前只驗證過 macOS；偵測到 ${process.platform}，請用 npm run vendor -- --from <obsidian.asar>`);
+  }
 
   console.log(lines.join('\n'));
   if (notes.length) console.log(`\n提醒：\n${notes.map((n) => `  - ${n}`).join('\n')}`);

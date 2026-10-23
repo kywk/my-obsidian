@@ -13,7 +13,9 @@
  */
 
 import { createHash } from 'node:crypto';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,12 +23,82 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(SCRIPT_DIR, '..');
 const VENDOR_ROOT = path.join(REPO_ROOT, 'vendor');
 
-const DEFAULT_FROM = '/Applications/Obsidian.app/Contents/Resources/obsidian.asar';
 const DEFAULT_OUT = 'vendor/obsidian';
+
+/**
+ * Where an installed Obsidian keeps its renderer on macOS.
+ *
+ * Obsidian self-updates the renderer without touching the .app: a newer
+ * obsidian-<version>.asar is dropped into Application Support and is what
+ * actually runs. Reading only /Applications would extract a stale renderer on
+ * any machine that has auto-updated, so every location is considered and the
+ * highest version wins.
+ */
+function candidateAsars() {
+  const home = os.homedir();
+  const list = [
+    path.join('/Applications/Obsidian.app/Contents/Resources/obsidian.asar'),
+    path.join(home, 'Applications/Obsidian.app/Contents/Resources/obsidian.asar'),
+  ];
+  const support = path.join(home, 'Library/Application Support/obsidian');
+  try {
+    for (const name of fsSync.readdirSync(support)) {
+      if (/^obsidian-\d+\.\d+\.\d+\.asar$/.test(name)) list.push(path.join(support, name));
+    }
+  } catch {
+    // Not installed, or never auto-updated; the .app locations still apply.
+  }
+  return list.filter((file) => fsSync.existsSync(file));
+}
+
+function compareVersions(a, b) {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+  }
+  return 0;
+}
+
+/** Cheap version probe: only the ASAR header and package.json are read. */
+async function probeAsarVersion(asarPath) {
+  const handle = await fs.open(asarPath, 'r');
+  try {
+    const head = Buffer.alloc(16);
+    await handle.read(head, 0, 16, 0);
+    const jsonLength = head.readUInt32LE(12);
+    const dataOffset = 8 + head.readUInt32LE(4);
+    const jsonBuf = Buffer.alloc(jsonLength);
+    await handle.read(jsonBuf, 0, jsonLength, 16);
+    const entry = JSON.parse(jsonBuf.toString('utf8')).files?.['package.json'];
+    if (!entry || typeof entry.offset !== 'string') return null;
+    const buf = Buffer.alloc(entry.size);
+    await handle.read(buf, 0, entry.size, dataOffset + Number(entry.offset));
+    return JSON.parse(buf.toString('utf8').replace(/^\uFEFF/, '')).version ?? null;
+  } catch {
+    return null;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function detectAsar() {
+  const found = [];
+  for (const file of candidateAsars()) {
+    const version = await probeAsarVersion(file);
+    if (version) found.push({ file, version });
+  }
+  if (found.length === 0) return null;
+  found.sort((x, y) => compareVersions(y.version, x.version));
+  return found[0];
+}
 
 const HASHED_FILES = ['app.js', 'app.css', 'worker.js', 'index.html'];
 const SKIPPED_DIRS = new Set(['node_modules']);
 const EXPECTED_VERSION_APP_JS_SIZE = { '1.14.4': 3942126 };
+// Versions the shim layer has been verified against (npm run check:*). Others
+// extract fine but may break at boot; say so instead of failing silently later.
+const TESTED_VERSIONS = new Set(['1.14.4']);
 
 const log = (...args) => console.log(...args);
 
@@ -34,8 +106,10 @@ function usage() {
   log(`Usage: node scripts/fetch-obsidian.mjs [options]
 
 Options:
-  --from <path>   Path to obsidian.asar
-                  (default: ${DEFAULT_FROM})
+  --from <path>   Path to obsidian.asar (also: OBSIDIAN_ASAR env)
+                  default: auto-detect the newest installed version under
+                  /Applications, ~/Applications and
+                  ~/Library/Application Support/obsidian (macOS)
   --out <dir>     Output directory, must resolve inside ${VENDOR_ROOT}
                   (default: ${DEFAULT_OUT})
   --force         Re-extract even if the existing manifest is up to date
@@ -50,7 +124,7 @@ function fail(message) {
 }
 
 function parseArgs(argv) {
-  const opts = { from: DEFAULT_FROM, out: null, force: false };
+  const opts = { from: process.env.OBSIDIAN_ASAR || null, out: null, force: false };
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -409,7 +483,22 @@ async function swapIntoPlace(tempDir, outDir) {
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
-  const asarPath = path.resolve(opts.from);
+  let source = opts.from;
+  if (!source) {
+    if (process.platform !== 'darwin') {
+      fail('目前只支援 macOS 自動偵測。請用 --from <obsidian.asar> 指定來源（或設 OBSIDIAN_ASAR）。');
+    }
+    const detected = await detectAsar();
+    if (!detected) {
+      fail(
+        '找不到已安裝的 Obsidian。請先從 https://obsidian.md 安裝官方桌面版，' +
+          '或用 --from <obsidian.asar> 指定來源。',
+      );
+    }
+    source = detected.file;
+    log(`detected Obsidian ${detected.version}`);
+  }
+  const asarPath = path.resolve(source);
 
   if (!(await pathExists(asarPath))) {
     fail(`source archive not found: ${asarPath}`);
@@ -432,6 +521,13 @@ async function main() {
     fail(
       `app.js size ${appJs.size} does not match the known size ${expectedSize} for v${version}\n` +
         '       the archive layout may have changed; do not trust extracted output',
+    );
+  }
+
+  if (!TESTED_VERSIONS.has(version)) {
+    console.warn(
+      `warning: Obsidian ${version} 尚未驗證（已驗證：${[...TESTED_VERSIONS].join(', ')}）。` +
+        '可能無法開機；請回報 issue，或改用已驗證版本的 --from。',
     );
   }
 

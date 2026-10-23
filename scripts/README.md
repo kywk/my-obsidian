@@ -13,7 +13,11 @@ node scripts/fetch-obsidian.mjs --from /path/to/obsidian.asar --out vendor/obsid
 - `--out` 預設是 **repo 相對** 的 `vendor/obsidian`；明確指定時則相對於 cwd。兩者都會以 realpath 檢查，必須嚴格位於 `<repo>/vendor/` 之下（`vendor/` 本身也不行，避免整個 vendor 被置換）。
 - manifest 寫在輸出目錄**旁邊**：`vendor/obsidian.manifest.json`，不是目錄內。
 - `vendor/` 已在 `.gitignore`；manifest 也不入版控。
-- 只讀取來源 asar，不會修改 `/Applications/Obsidian.app`。
+- 只讀取來源 asar，不會修改 Obsidian.app。
+- 不帶 `--from` 時自動偵測（macOS）：`/Applications`、`~/Applications` 的 Obsidian.app，以及
+  `~/Library/Application Support/obsidian/obsidian-<版本>.asar`，取**版本最高**者。
+  Obsidian 自動更新後，新版 renderer 只在 Application Support，.app 內的仍是舊版。
+- 也可用 `OBSIDIAN_ASAR` 環境變數；未驗證的版本會警告但仍解包。
 
 ### ASAR 格式（實測 v1.14.4）
 

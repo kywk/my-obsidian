@@ -14,7 +14,7 @@
 3. 改動前讀 `DESIGN.md` §11；動 fs/shim 前讀 `packages/shim/GAPS.md`。
 4. 完成後同步：`DESIGN.md`（新陷阱）、`GAPS.md`（shim 落差）、本檔（狀態）、`HANDOFF.md`（數字）。
 
-程式與驗收基準：`e11953a`（2026-10-24，自動信任與收合選單）——334 個單元測試、21 支 harness（239 項）。
+程式與驗收基準：`e11953a`（2026-10-24，自動信任與收合選單）——335 個單元測試、21 支 harness（239 項）。
 
 ---
 
@@ -51,6 +51,10 @@
 ---
 
 ## 需要決策
+
+- [!] **驗證 Obsidian 1.14.5（以及之後的版本）**
+  開發機的 Obsidian 已自動更新到 1.14.5，`npm run vendor` 現在會解出它，但 harness 只在 1.14.4 驗過。
+  發布前以 1.14.5 跑完整 21 支；通過後把版本加進兩處 `TESTED_VERSIONS`（見 DESIGN §11.31）。
 
 - [!] **`releases.obsidian.md` 要不要加入 proxy allowlist**
   Obsidian 在 github／raw 失敗時會改打 `https://releases.obsidian.md/proxy?url=…`（fallback）。
@@ -124,7 +128,7 @@
 
 ### 平台覆蓋
 
-- [ ] **只實測 darwin / arm64 + Chrome** —— Windows 的 UNC 路徑分支、Safari／Firefox 未測。
+- [ ] **只實測 darwin / arm64 + Chrome**（宿主偵測、fetch 與 doctor 目前只做 macOS；其他平台需 `--from`） —— Windows 的 UNC 路徑分支、Safari／Firefox 未測。
 
 ---
 
@@ -155,7 +159,7 @@
 
 ```bash
 npm --prefix packages/server ci # 第一次或 package-lock 變更後
-npm test                        # 334 個單元測試
+npm test                        # 335 個單元測試
 npm run check:spike             # 其餘 20 支見 README「驗收」
 ```
 

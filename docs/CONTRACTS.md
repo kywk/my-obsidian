@@ -51,6 +51,12 @@ Server 在 HTML 中注入一段同步可用的 JSON，**必須早於任何 shim 
 讀出同一段字串，只存在記憶體並注入；**只允許 loopback**，不寫入 config。
 這是 server-local 的行為，不是 wire contract 的例外。
 
+`POST /api/consent` body：`{ termsText: string, acknowledgements: string[] }`。
+`acknowledgements` 必須包含 `unofficial`、`obsidian-terms`、`private-use`、`own-risk` 全部四項
+（同意畫面逐項勾選；語意見根目錄 `NOTICE.md`），缺項回 400 `EACK` 且不寫檔。
+成功時 config 會多記 `acknowledgements`、`noticeVersion`、`acknowledgedAt`；`termsAccepted`
+仍只由 `termsText` 推導，不看這些欄位。
+
 boot-data 在 renderer 啟動前將 `localStorage["enable-plugin-" + vaultId]` 設成 `"true"`；
 官方 vault IPC 以相同 id 建立 appId。每次啟動都覆寫先前的限制模式決定，以省略信任彈窗；
 個別外掛啟用清單與 server policy 仍決定實際載入項目。localStorage 若被瀏覽器拒絕，
