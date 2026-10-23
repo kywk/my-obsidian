@@ -11,7 +11,8 @@
  *   4. appCommand         — clicking an appCommand item runs the command
  *   5. moveToNewWindow    — tab right-click -> Move to new window -> new target
  *   6. editorContextMenu  — editor right-click shows a menu with clipboard items
- *   7. noExceptions       — the main window collected no unhandled exception
+ *   7. noExceptions       — no unhandled exception, fatal or caught menu warning
+ *   8. nested lifecycle   — nested action order, keyboard/sibling cleanup, hover cancellation
  *
  * Two menu implementations are exercised, and the report says which one ran:
  *
@@ -112,7 +113,7 @@ const report = {
   menuPath: null,
   criteria: {},
   facts: {},
-  console: { errors: [], exceptions: [] },
+  console: { errors: [], exceptions: [], menuWarnings: [] },
 };
 const checks = [];
 let verbose = args.verbose;
@@ -277,6 +278,9 @@ function attachConsole(session) {
       report.console.exceptions.push(
         (d.exception && (d.exception.description || d.exception.value)) || d.text || 'exception',
       );
+    } else if (msg.method === 'Runtime.consoleAPICalled' && msg.params.type === 'warning') {
+      const text = msg.params.args.map(a => a.value ?? a.description ?? a.type).join(' ');
+      if (text.startsWith('[my-obsidian] menu:')) report.console.menuWarnings.push(text.slice(0, 1000));
     } else if (msg.method === 'Runtime.consoleAPICalled' && msg.params.type === 'error') {
       report.console.errors.push(
         msg.params.args.map((a) => a.value ?? a.description ?? a.type).join(' ').slice(0, 500),
@@ -374,6 +378,61 @@ function modelItem(session, commandId) {
       return JSON.stringify(walk((window.__MYOBS_MENU.getTemplate() || [])));
     })()`,
   ).then((raw) => JSON.parse(raw));
+}
+
+async function submenuLifecycle() {
+  const menu = window.__MYOBS_MENU;
+  const facts = {}, criteria = {};
+  let doc = document;
+  const popup = (items, close) => {
+    const panel = menu.popupTemplate(items, { x: 30, y: 60 }, close);
+    if (!panel) throw new Error('Menu popup did not open');
+    doc = panel.ownerDocument;
+    return panel;
+  };
+  const rows = () => [...doc.querySelectorAll('.myobs-menu-row')];
+  const row = text => rows().find(el => el.querySelector('.myobs-menu-label')?.textContent === text);
+  const click = text => { const el = row(text); if (!el) throw new Error('Missing menu row: ' + text); el.click(); };
+  const clean = () => !menu.isOpen() && !doc.querySelector('.myobs-menu-panel') && menu.getState().rows === 0;
+  const key = key => doc.dispatchEvent(new doc.defaultView.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+  try {
+    menu.close();
+    const order = [];
+    popup([{ label: 'First', submenu: [{ label: 'Second', submenu: [{ label: 'Run nested action', click: () => order.push('action') }] }] }], () => order.push('close'));
+    click('First'); click('Second'); click('Run nested action');
+    facts.actionOrder = order;
+    criteria.nestedMenuAction = clean() && order.join(',') === 'close,action';
+    if (!criteria.nestedMenuAction) return { criteria, facts, error: 'Nested selection did not close and run its action' };
+
+    let closes = 0;
+    popup([{ label: 'Branch A', submenu: [{ label: 'Leaf A' }] }, { label: 'Branch B', submenu: [{ label: 'Leaf B' }] }], () => closes++);
+    const root = doc.querySelector('.myobs-menu-panel');
+    click('Branch A');
+    key('ArrowLeft');
+    const leftClosed = !row('Leaf A') && root._myobsChildren.length === 0 && menu.getActiveRow() === 'Branch A';
+    click('Branch A');
+    row('Branch B').dispatchEvent(new doc.defaultView.MouseEvent('mouseenter'));
+    const siblingClosed = !row('Leaf A') && root._myobsChildren.length === 0;
+    click('Branch B');
+    const oneChild = root._myobsChildren.length === 1;
+    key('Escape');
+    criteria.submenuKeyboardAndSiblingCleanup = leftClosed && siblingClosed && oneChild && closes === 1 && clean() && root._myobsChildren.length === 0;
+    facts.submenuCleanup = { leftClosed, siblingClosed, oneChild, closes };
+
+    let pendingCloses = 0;
+    popup([{ label: 'Pending submenu', submenu: [{ label: 'Late child' }] }], () => pendingCloses++);
+    const pendingRow = row('Pending submenu');
+    pendingRow.dispatchEvent(new doc.defaultView.MouseEvent('mouseenter'));
+    const hadTimer = !!pendingRow._myobsTimer;
+    pendingRow.hidden = true;
+    menu.close();
+    const timerCleared = !pendingRow._myobsTimer;
+    // Cross the runtime's 140 ms hover deadline to prove teardown cancels it.
+    await new Promise(resolve => setTimeout(resolve, 220));
+    criteria.submenuHoverCancelledOnDismiss = hadTimer && timerCleared && pendingCloses === 1 && clean();
+    facts.pendingHover = { hadTimer, timerCleared, closes: pendingCloses };
+  } catch (error) { facts.error = String(error); }
+  return { criteria, facts };
 }
 
 async function main() {
@@ -842,11 +901,6 @@ async function main() {
   );
 
   // ---- 7. no unhandled exceptions --------------------------------------
-  const fatalVisible = await evaluate(
-    mainSession,
-    '(function(){var e=document.getElementById("myobs-fatal");return !!(e && !e.hidden && e.style.display !== "none");})()',
-  ).catch(() => true);
-  fact('fatalVisible', fatalVisible);
   fact(
     'templateKeys',
     JSON.parse(
@@ -880,11 +934,22 @@ async function main() {
     mainSession,
     'JSON.stringify(window.__MYOBS_MENU ? window.__MYOBS_MENU.getState() : null)',
   ).catch(() => null));
+  const submenuResult = await evaluate(mainSession, `(${submenuLifecycle.toString()})()`);
+  fact('submenuLifecycle', submenuResult.facts);
+  for (const name of ['nestedMenuAction', 'submenuKeyboardAndSiblingCleanup', 'submenuHoverCancelledOnDismiss']) {
+    await check(name, async () => submenuResult.criteria[name] === true, submenuResult.error || submenuResult.facts.error);
+  }
+  const fatalVisible = await evaluate(
+    mainSession,
+    '(function(){var e=document.getElementById("myobs-fatal");return !!(e && !e.hidden && e.style.display !== "none");})()',
+  ).catch(() => true);
+  fact('fatalVisible', fatalVisible);
   await check(
     'noExceptions',
     async () => {
       const errors = report.console.exceptions;
       if (errors.length) throw new Error(`${errors.length} unhandled exception(s): ${errors.slice(0, 3).join(' | ')}`);
+      if (report.console.menuWarnings.length) throw new Error('menu runtime warning: ' + report.console.menuWarnings.join(' | '));
       if (fatalVisible) throw new Error('the runtime fatal screen is visible');
       return true;
     },

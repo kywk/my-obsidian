@@ -369,8 +369,8 @@
 		}
 		var panel = row._myobsSubmenu;
 		if (panel) {
-			closePanel(panel);
 			row._myobsSubmenu = null;
+			closePanel(panel);
 		}
 		row.classList.remove("is-open");
 	}
@@ -379,13 +379,32 @@
 		if (!panel) return;
 		if (state.activeRow && panel.contains(state.activeRow)) state.activeRow = null;
 		var parent = panel._myobsParentRow;
+		panel._myobsParentRow = null;
 		if (parent) {
-			closeSubmenu(parent);
-			parent._myobsSubmenu = null;
-			parent.classList.remove("is-open");
+			// Detach the back-reference before descending: calling closeSubmenu
+			// here would re-enter closePanel on this same panel indefinitely.
+			if (parent._myobsSubmenu === panel) {
+				if (parent._myobsTimer) clearTimeout(parent._myobsTimer);
+				parent._myobsTimer = null;
+				parent._myobsSubmenu = null;
+				parent.classList.remove("is-open");
+			}
+			var parentPanel = parent._myobsPanel;
+			if (parentPanel && parentPanel._myobsChildren) {
+				parentPanel._myobsChildren = parentPanel._myobsChildren.filter(function (child) {
+					return child !== panel;
+				});
+			}
+		}
+		// A pending hover must not recreate a submenu after its parent closes.
+		var rows = panel.children;
+		for (var r = 0; r < rows.length; r++) {
+			if (rows[r]._myobsTimer) clearTimeout(rows[r]._myobsTimer);
+			rows[r]._myobsTimer = null;
 		}
 		// Children first so their close hooks see a live parent.
 		var children = panel._myobsChildren ? panel._myobsChildren.slice() : [];
+		panel._myobsChildren = [];
 		for (var i = 0; i < children.length; i++) closePanel(children[i]);
 		clearRows(panel);
 		panel.remove();
