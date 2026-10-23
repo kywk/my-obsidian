@@ -88,7 +88,7 @@ my-obsidian/
 | 1 | 交付架構 | 網頁原生客戶端，重用**官方 desktop bundle**（非 mobile bundle）；目標是 Desktop 版 UI 語意 || 2 | Renderer 來源與版本 | 本機 `/Applications/Obsidian.app/Contents/Resources/obsidian.asar`，版本跟隨安裝版（1.14.4）；`scripts/fetch-obsidian.mjs` 取得 |
 | 3 | `terms` 閘 | **首啟同意畫面**：使用者本人按下同意 → 存 server config → 注入 `sendSync("terms")`。**程式碼不內建該字串**。未同意則拒絕啟動並顯示明確錯誤（不可停在白色載入動畫） |
 | 4 | MVP 驗收邊界 | 編輯／預覽、檔案樹、分頁與分割、搜尋、標籤／反向連結、圖譜、Canvas、命令面板、核心 plugin 全數、社群 plugin 可安裝啟用、主題／片段 |
-| 5 | 桌面專屬功能 | **MVP 要，已實作**：多視窗 popout（§11.8）、自繪選單列＋右鍵選單（§11.9）、列印 PDF（§11.10）、手機寬度降級（§11.11）。**降級**：外部 App 開啟（檔案→下載）、`obsidian://`→ web URL。**不做**：全域快捷鍵、系統匣、CLI、Sync/Publish |
+| 5 | 桌面專屬功能 | **MVP 要，已實作**：多視窗 popout（§11.8）、自繪選單列＋右鍵選單（§11.9）、列印 PDF（§11.10）、平板／桌面版面（§11.11）。**降級**：外部 App 開啟（檔案→下載）、`obsidian://`→ web URL。**不做**：全域快捷鍵、系統匣、CLI、Sync/Publish |
 | 6 | Plugin 支援深度 | **L2**：瀏覽器端 Node polyfill + `fs`→RPC。L3（server 端執行）僅保留架構空間，不實作 |
 | 7 | 部署與存取控制 | 預設 bind `127.0.0.1`；`--host 0.0.0.0 --auth-token` 才對外；TLS 交給 reverse proxy。單一 vault，路由 `/v/<vaultId>/` 預留多 vault |
 | 8 | 資料一致性 | **server 為單一寫入者**為原則；外部寫入者存在時採條件寫入 + conflict copy（見 §6） |
@@ -96,7 +96,7 @@ my-obsidian/
 | 10 | 與 Markport 的關係 | **不 fork、不引入程式碼**（GPL-3.0 會綁住產品方向）。僅閱讀其 `archive/desktop-runtime` tag 作為參考，結論寫進本文件並標註出處 |
 | 11 | Plugin 安裝流程 | **已實作**：`GET /api/proxy`（server 端 allowlist + SSRF 防護）、`POST /api/plugins/install`（temp+rename 原子替換、驗 digest、保留 `data.json`）、`POST /api/plugins/uninstall`（移到 `.trash`，不覆蓋）。詳見 §11.12 |
 | 12 | 同步拓撲 | MVP 預設與 vault 同機（Maestral 已在跑）；server 不主動執行任何 git 指令 |
-| 13 | 目標 UI 形態 | 桌機版面為預設；< 768px 自動降級手機版面（§11.11）；PWA manifest 有，service worker **只快取靜態資產，絕不快取 vault 內容**（`/api/fs`、`/api/watch`、`/v/*`、`/obsidian/app.js` 全排除） |
+| 13 | 目標 UI 形態 | 桌機與平板為預設；>= 600px 維持桌面／平板版面，< 600px 才降級手機版面（§11.11，手機非支援目標）；PWA manifest 有，service worker **只快取靜態資產，絕不快取 vault 內容**（`/api/fs`、`/api/watch`、`/v/*`、`/obsidian/app.js` 全排除） |
 | 14 | 外部變更監控 | **服務啟動即監控（來源不限）**：Maestral/Dropbox、Desktop Obsidian、git、手動編輯 |
 | 15 | `/api/fs` 契約 | 單一 `POST /api/fs`（`{op, path, args}`）+ `ifMtimeMs` 條件寫入；大檔走 `GET/PUT /v/<id>/<path>` |
 | 16 | WS 推播 | `awaitWriteFinish` + 150ms 批次聚合 + write-token 回音過濾 + `WATCH_DISABLED` 開關 |
@@ -224,9 +224,9 @@ server config，再由此注入（契約欄位為 `termsText`，見 `CONTRACTS.m
 | 1 | `node tools/spike-check.mjs --vault <複本>` | 10 | boot、無 installer 更新對話框、完整載入（檔案數與磁碟可見數相符）、metadata cache、文字往返、二進位往返、冷啟、workspace 隔離、零例外、良性錯誤不蓋畫面 |
 | 2 | `node tools/hotreload-check.mjs` | 4 | WS 連線、筆記外部變更、plugin 熱重載、回音過濾 |
 | 3 | `node tools/attachment-check.mjs` | 全部 | `/v/*` URL 形狀、位元組一致、瀏覽器實際解碼、Range、pdfjs、編碼檔名 |
-| 4 | `node tools/popout-check.mjs` | 8 | popout 開啟、同一 app 物件、指定筆記、獨立寫入、真實鍵盤輸入、deep link |
+| 4 | `node tools/popout-check.mjs` | 10 | popout 開啟、同一 app 物件、指定筆記、獨立寫入、真實鍵盤輸入、deep link、**重新載入後還原** |
 | 5 | `node tools/menu-check.mjs` | 8 | 選單列、render-menu、子選單、狀態同步、appCommand 執行、右鍵選單、Move to new window |
-| 6 | `node tools/print-check.mjs` | 19 | 只印筆記、PDF bytes、狀態還原、manifest、service worker、寬度切換 |
+| 6 | `node tools/print-check.mjs` | 21 | 只印筆記、PDF bytes、狀態還原、manifest、service worker、桌面／平板／手機寬度、平板開機版面 |
 | 7 | `node tools/dialog-check.mjs` | 14 | `remote.dialog`、FSA／合成路徑、Export to PDF 全鏈路、二次匯出狀態還原 |
 | 8 | `node tools/plugin-install-check.mjs` | 6 | **真實網路**：Browse（popout）→ 搜尋 → Install → Enable → Disable → Uninstall，含完整 proxy/fs 請求清單 |
 | 9 | `node tools/notices-check.mjs` | 10 | 三等級樣式、dedupe、自動消失、conflict（兩條路徑、單卡、點擊真的開副本）、外掛失敗合併 |
@@ -393,7 +393,11 @@ c.app = t.app;                    // ← 同一個 app 物件，同一個 render
 必須由宿主扮演 Obsidian `main.js` 的 roles 解析，翻譯成 `popup,width,height[,left,top]`。
 
 實測能力邊界：popout 可用時間 3–42 ms、顯示指定筆記 31–153 ms；樣式同步（同一份 `app.css`）。
-parity 缺口只剩「開機自動還原 popout」需要手勢（瀏覽器擋）。分頁右鍵的
+**開機自動還原仍受瀏覽器手勢限制**：`loadLayout()` 在 boot 時呼叫 `window.open`，一定被擋。
+runtime 現在會把上次成功開啟的 popout 路徑存進 localStorage（每個 vault 一組），
+重新載入後提供一個明確的「還原上個視窗 (N)」提示條；一次點擊開一個，
+因為 Chrome 會把同一手勢的第二個 `window.open()` 當成 unsolicited popup。
+`check:popout` 10/10 覆蓋這條路徑。分頁右鍵的
 `Move to new window` 已可用：`nativeMenus: false` 時由 Obsidian 自己畫 HTML 選單；
 未設定時（macOS 預設 true）由 runtime 的 `Menu.popup()` fallback 接手（§11.9）。
 
@@ -473,6 +477,12 @@ margins 不套用（由瀏覽器列印分頁取代）；(4) popout realm 未載�
 
 **只改 `isPhone` / `isTablet`**，不改 `canDisplayRibbon` / `canSplit` / `canStackTabs` ——
 那三個在 bundle 裡是 `!isPhone` 的 getter，直接改寫等於複製一份 bundle 邏輯，版本一改就漂移。
+
+**版面門檻是 600px，不是 768px。** 桌機與平板是支援目標，手機不是：
+`>= 600px` 完全不覆寫（Obsidian 自己決定桌面或平板版面），
+`< 600px` 才套 `isPhone` fallback，讓極窄視窗仍可用。
+實測 820×1180 時 `isPhone=false`、`canDisplayRibbon/canSplit/canStackTabs` 都是 `true`；
+480×900 才是 phone fallback。`check:print` 以 1280／820／480 三段驗收。
 
 還原時用「套用前快照」而不是重新用 media query 計算：實測 1280×900 時
 `Platform.isTablet` 是 `false`，而 Obsidian 自己的 600×600 query 是 `matches: true`，

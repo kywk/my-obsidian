@@ -27,7 +27,7 @@ Node（Fastify）
 |---|---|
 | 功能 baseline | `b87612b`（2026-10-23，dev mode + 驗收基準修正） |
 | 單元測試 | **254/254** |
-| 端到端 harness | **11 支 / 105 項斷言**（`check:spike` 10 項） |
+| 端到端 harness | **11 支 / 109 項斷言**（`check:spike` 10 項） |
 | Node | 22；server 與 shim 都是 **plain JavaScript，無 build step** |
 | renderer | Obsidian 1.14.4，`app.js` 3,942,126 bytes，由 `npm run vendor` 產生 |
 | 目前不做 | 多使用者／登入、即時共編、多 vault、`child_process` L3 |
@@ -126,7 +126,7 @@ Harness（全部只對複本；先設 `MYOBS_LIVE_VAULT`）：
 ```bash
 export MYOBS_LIVE_VAULT=/path/to/real-vault
 npm run check:spike -- --vault <copy>    # 10 項
-npm run check:popout -- --vault <copy>   # 8 項
+npm run check:popout -- --vault <copy>   # 10 項
 # 其餘 9 支與「每支一份乾淨複本」的迴圈見 docs/HANDOFF.md
 ```
 

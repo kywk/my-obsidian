@@ -638,6 +638,75 @@ async function main() {
       }
     }
 
+    // Restore after reload: the browser blocks window.open() during boot, so
+    // the runtime offers the tracked last-session path as a clickable entry.
+    // Seed the same localStorage key the runtime writes, reload, click, and
+    // verify the popout really owns the note.
+    const vaultId = await evaluate('window.__MYOBS.vaultId');
+    await evaluate(
+      `localStorage.setItem('myobs-last-popouts:' + ${JSON.stringify(vaultId)}, JSON.stringify([${JSON.stringify(notePath)}])); "ok"`,
+    );
+    const pagesBeforeRestore = new Set((await listPageTargets(cdp)).map((p) => p.targetId));
+    await cdp.send('Page.navigate', { url }, mainSession);
+    await waitForPage(cdp, mainSession, '!!window.app', 30000);
+    const restoreNoticeShown = await waitFor(
+      `!!(document.getElementById('myobs-popout-notice') && document.getElementById('myobs-popout-notice').textContent.includes('還原'))`,
+      20000,
+    );
+    report.facts.restoreNotice = await evaluate(`(function () {
+      const root = document.getElementById('myobs-popout-notice');
+      return {
+        shown: !!root,
+        text: root ? String(root.textContent).slice(0, 160) : null,
+        restore: (window.__MYOBS_POPOUT || {}).restore || null,
+        button: root ? Array.from(root.querySelectorAll('button')).map(function (b) { return b.textContent; }) : [],
+      };
+    })()`);
+    report.criteria.restoreNotice =
+      restoreNoticeShown === true &&
+      report.facts.restoreNotice.restore?.offered === true &&
+      report.facts.restoreNotice.button.some((text) => text.includes('還原'));
+
+    if (restoreNoticeShown) {
+      const restoreRect = await evaluate(`(function () {
+        const buttons = Array.from(document.querySelectorAll('#myobs-popout-notice button'));
+        const restore = buttons.find(function (b) { return b.textContent.indexOf('還原') !== -1; });
+        if (!restore) return null;
+        const r = restore.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2, label: restore.textContent };
+      })()`);
+      report.facts.restoreButton = restoreRect;
+      if (restoreRect) await clickAt(cdp, mainSession, restoreRect, { button: 'left' });
+
+      let restoreTarget = null;
+      const restoreDeadline = Date.now() + 10000;
+      while (Date.now() < restoreDeadline) {
+        const pages = await listPageTargets(cdp);
+        restoreTarget = pages.find((p) => !pagesBeforeRestore.has(p.targetId));
+        if (restoreTarget) break;
+        await sleep(200);
+      }
+      report.facts.restoreTarget = restoreTarget
+        ? { targetId: restoreTarget.targetId, url: restoreTarget.url, title: restoreTarget.title }
+        : null;
+      if (restoreTarget) {
+        const restored = await inspectPopout(restoreTarget, 2);
+        report.facts.restorePopout = {
+          ready: restored.probe.ready === true,
+          ownedByPopout: restored.probe.ownedPath,
+          activePath: restored.probe.activePath,
+        };
+        report.criteria.restorePopout =
+          restored.probe.ready === true && restored.probe.ownedPath === notePath;
+        await evalInPage(cdp, restored.sessionId, 'window.close(); "closing"').catch(() => {});
+        await sleep(600);
+      } else {
+        report.criteria.restorePopout = false;
+      }
+    } else {
+      report.criteria.restorePopout = false;
+    }
+
     // Evidence for the menu-bar gap (not a criterion: menus are a separate
     // DESIGN.md §3 item 5 feature, tracked in GAPS.md §2).
     const headerRect = await evaluate(`(function () {

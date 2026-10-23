@@ -22,9 +22,11 @@
  *     finished (a microtask later).
  *
  * This is the zero-patch mechanism: vendor/obsidian/app.js stays byte
- * identical (AGENTS.md hard rule 1). When the viewport is >= 768 px nothing is
+ * identical (AGENTS.md hard rule 1). When the viewport is >= 600 px nothing is
  * overridden at all — the accessors are not even installed until the first
- * width breach, so desktop behaviour is bit-for-bit the bundle's own.
+ * width breach, so desktop/tablet behaviour is bit-for-bit the bundle's own.
+ * Below 600 px the bundle's phone layout is used as a best-effort fallback;
+ * phones are not a supported target (DESIGN.md §11.11).
  *
  * Contract for harnesses:
  *   window.__MYOBS_PLATFORM_BRIDGE = { installed, captured, overrides, applied, events[] }
@@ -32,8 +34,8 @@
 (function () {
 	"use strict";
 
-	var BREAKPOINT_PX = 768;
-	var NARROW_QUERY = "(max-width: 767.98px)";
+	var BREAKPOINT_PX = 600;
+	var NARROW_QUERY = "(max-width: 599.98px)";
 	var EVENTS_MAX = 50;
 
 	var events = [];

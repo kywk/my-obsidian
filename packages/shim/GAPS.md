@@ -3,7 +3,7 @@
 本檔案記錄 `packages/shim/src/**` 與 `packages/runtime/index.html` 中所有
 **近似實作 / 尚未實作 / 明知不正確** 的行為。
 
-最後同步：2026-10-23（baseline 修正：ResizeObserver fatal、harness 守門、dev mode；updater IPC 修正）。
+最後同步：2026-10-23（baseline 修正：ResizeObserver fatal、harness 守門、dev mode；updater IPC 修正；popout 還原與平板門檻）。
 
 維護規則（`AGENTS.md`）：遇到不確定的行為就寫在這裡，不要猜一個看起來合理的實作。
 每一條都要寫出：位置、目前行為、正確行為應該是什麼。
@@ -167,7 +167,8 @@
 | `popout.js`（features 翻譯） | Obsidian 送的 feature 字串是給它自己的 main process 解析的（`setWindowOpenHandler`）：`background=`、`parented=1`。**Chromium 收到 `background=…` 會讓整個 `window.open()` 回 `null`**（實測：`popup,background=#202020` → null、`popup,width=700,height=500` → Window，且與 `--disable-popup-blocking` 無關）。因此 popout.js 先解析再以 `popup,width=…,height=…[,left=…,top=…]` 重送。 | Electron：main process 解析並套用（`background` → `BrowserWindow.backgroundColor`、`parented` → 視窗父子關係）。 |
 | `popout.js`（`background`） | 以 `position:fixed;z-index:-1` 的覆蓋層模擬「視窗底色」，Obsidian 的 `.app-container` 出現後移除。 | Electron 的 `BrowserWindow.backgroundColor` 在 web content 之前就先畫好，沒有閃白。覆蓋層只能在 document 內著色，第一次 paint 的空窗仍可能有極短的閃爍。 |
 | `popout.js`（預設尺寸） | 未指定尺寸時補 `width=800,height=600`（Electron `BrowserWindow` 預設值）。Chrome 仍會自行調整（實測 800×600 要求 → `innerHeight` 533），位置也可能被 clamp。 | Electron 完全依 features / 預設值決定，且在 `screen.getAllDisplays()` 的重疊判定通過時精確還原座標。 |
-| `popout.js`（彈窗阻擋） | 沒有手勢的 popout 請求（最常見：boot 時還原 `workspace-server.json` 裡的 `"window"` 節點）會被瀏覽器擋掉，`window.open` 回 `null`。Obsidian 自己只會 `console.error("Failed to restore popout window")` 後丟棄該節點；popout.js 另外顯示提示條與「在新視窗開啟目前筆記」重試按鈕（點擊＝手勢）。 | 桌機不需要手勢，開機即還原全部視窗。 |
+| `popout.js`（彈窗阻擋） | 沒有手勢的 popout 請求（最常見：boot 時還原 `workspace-server.json` 裡的 `"window"` 節點）會被瀏覽器擋掉，`window.open` 回 `null`。Obsidian 自己只會 `console.error("Failed to restore popout window")` 後丟棄該節點。popout.js 會記住上次成功開啟的檔案路徑，重新載入後顯示「還原上個視窗 (N)」提示條；一次點擊開一個（同一手勢的多個 `window.open()` 會被 Chrome 視為 unsolicited popup）。 | 桌機不需要手勢，開機即還原全部視窗。 |
+| `popout.js`（上次工作階段） | 每個 vault 一組 localStorage 清單（上限 8 個路徑），只記「真的被 popout leaf 載入」的檔案；使用者關閉 popout 會移除，重新載入則保留。還原只重建筆記，不還原視窗尺寸、位置或堆疊順序。 | 桌機由 `workspace-server.json` 的 `"window"` 節點還原完整視窗狀態（尺寸／位置／分頁）。 |
 | `popout.js`（`#popout=<vault path>`） | URL hash/query 只能當「請求」：Obsidian 的 popout document 是 `about:blank`（無法用 URL 指定），而 `window.open` 需要手勢。因此這個通道顯示提示條，由使用者點擊後以 `app.workspace.openLinkText(path, "", "window")` 開啟。 | 桌機沒有對應功能（`obsidian://` deep link 是另一項）。 |
 | `popout.js`（觸發路徑） | 分頁右鍵選單（「Move to new window」）可用：`nativeMenus:false` 時由 Obsidian 自己畫 HTML 選單；未設定時（macOS 預設 true）由 `runtime/menu.js` 的 `Menu.popup()` fallback 接手。命令面板「Open current tab in new window」與拖曳分頁也可用。 | 已對齊 `DESIGN.md` §11.9；popout 沒有頂部 menubar，仍是已知缺口。 |
 | `electron-shim.js`（`remote.screen`） | 以 `window.screen` 近似出單一 display：`bounds` 用 `width/height`，`workArea` 用 `availWidth/availHeight`（拿不到 macOS 選單列／Dock 的 inset）。Obsidian 只用它做 popout 座標還原的重疊判定。 | Electron 回真實 display 清單與 work area；多螢幕環境下只能看到「目前這一個」。 |

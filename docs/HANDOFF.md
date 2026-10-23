@@ -48,7 +48,7 @@ npm run dev -- --vault <copy>             # 另開終端；app 能 boot、沒有
 - 功能 baseline：`b87612b`（dev mode + 驗收基準修正）；目前 HEAD 以 `git log -1` 為準
 - 76 個追蹤檔案（以 `git ls-files | wc -l` 為準）
 - Node 22；server 與 shim 都是 **plain JavaScript，沒有 build step**
-- 254 個單元測試 + **11 支零依賴 CDP harness**（105 項斷言；`check:spike` 10 項）
+- 254 個單元測試 + **11 支零依賴 CDP harness**（109 項斷言；`check:spike` 10 項）
 - renderer 是**未修改**的官方 Obsidian 1.14.4（`app.js` 3,942,126 bytes），
   由 `npm run vendor` 在操作者機器上解包，`vendor/` 不進版控
 - CI 只跑單元測試與語法檢查；harness 需要本機 vault 複本、`vendor/` 與 Chrome

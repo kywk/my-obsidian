@@ -277,10 +277,10 @@ GET /                      -> 在 </head> 前注入 <link rel="manifest">、them
 
 ```js
 window.__MYOBS_MENU             = { installed, setTemplate, updateMenuItems, renderMenuAtCursor, popupTemplate, events[] }
-window.__MYOBS_POPOUT           = { installed, frames[], events[], blocked, request, openInNewWindow }
+window.__MYOBS_POPOUT           = { installed, frames[], events[], blocked, request, restore { saved[], offered, restored[] }, openInNewWindow }
 window.__MYOBS_PLUGIN_WATCH     = { enabled, subscribed, events[], reloadAll() }
 window.__MYOBS_PRINT            = { installed, printActiveNote(), beginPrintView(), endPrintView(), lastResult, events[] }
-window.__MYOBS_PLATFORM_BRIDGE  = { installed, captured, overrides, applied, breakpointPx: 768, events[] }
+window.__MYOBS_PLATFORM_BRIDGE  = { installed, captured, overrides, applied, breakpointPx: 600, events[] }
 window.__MYOBS_NET              = { enabled, hosts[], rewrite(url), stats { rewritten, skipped, lastUrl } }
 window.__MYOBS_WATCH            = { watch, subscribe, state { connected, reconnects, received, dispatched, filtered } }
 window.__MYOBS_NOTICES          = { installed, enabled, push, dismiss, list, clear, events[], consumeLastConflict }

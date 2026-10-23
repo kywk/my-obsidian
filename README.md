@@ -6,7 +6,7 @@
 外面的 Electron／Node 依賴由 13 個 shim 取代。不是重寫的編輯器，也不是遠端桌面串流。
 
 ```
-Obsidian 1.14.4 · Node 22 · 254 個單元測試 · 11 支端到端 harness（105 項斷言）
+Obsidian 1.14.4 · Node 22 · 254 個單元測試 · 11 支端到端 harness（109 項斷言）
 ```
 
 > **Agent 入口**：`AGENTS.md`（硬規則與文件路由）→ `docs/HANDOFF.md`（接手驗證）→
@@ -158,7 +158,7 @@ npm run dev -- --vault ~/my-vault
 - **多視窗 popout**（同一份 app 的第二個 DOM 表面，不是第二個實例）
 - **選單列、右鍵選單、列印／Export to PDF**
 - **外部變更熱重載**、**衝突副本提示**、**斷線偵測與重連補償**
-- 手機寬度自動降級版面、PWA 可加到主畫面
+- 桌面與平板優先的版面（>=600px 維持 Obsidian 桌面／平板版面；<600px 才是手機 fallback）、PWA 可加到主畫面
 
 實測基準（作者的本機 vault，10,150 檔 / 341 MB）：
 
@@ -178,7 +178,7 @@ npm run dev -- --vault ~/my-vault
 | 需要 `child_process` 的外掛（如 templater 的 user scripts） | 瀏覽器沒有伺服器端執行權限。這是刻意的邊界 |
 | 系統匣、全域快捷鍵、`obsidian://`、CLI、自動更新 | 瀏覽器沒有對應能力 |
 | Sync / Publish 登入 | 官方帳號機制，本專案不使用 |
-| 開機自動還原 popout 視窗 | 瀏覽器要求使用者手勢，會顯示提示讓你點一下還原 |
+| 開機自動還原 popout 視窗 | 瀏覽器要求使用者手勢；會列出上次的視窗，讓你逐一點擊還原（一次一個） |
 | 儲存對話框的實際落地路徑 | 瀏覽器不揭露目錄；PDF 一律由列印對話框決定位置 |
 | 多人同時編輯 | 目前是單一寫入者模型 + conflict copy，未實作 OT/CRDT |
 | `onload` 在建構後才拋錯的外掛，不會出現在失敗通知裡 | 它仍留在 `app.plugins.plugins`，狀態差集看不到 |

@@ -72,6 +72,19 @@
 	// popout without one (openPopoutLeaf from the command palette does).
 	var DEFAULT_POPOUT_WIDTH = 800;
 	var DEFAULT_POPOUT_HEIGHT = 600;
+	/*
+	 * Last-session popouts. The browser will not let a page reopen windows
+	 * without a gesture, so Obsidian's boot-time restore is blocked. Keep the
+	 * paths it managed to track and offer an explicit one-click restore after
+	 * reload. One window per click: Chrome treats a second window.open() from
+	 * the same gesture as an unsolicited popup.
+	 */
+	var RESTORE_KEY_PREFIX = "myobs-last-popouts:";
+	var RESTORE_MAX = 8;
+	var RESTORE_NOTICE_DELAY_MS = 1200;
+	var RESTORE_PENDING_MS = 5000;
+	var unloading = false;
+	var pendingRestore = Object.create(null);
 
 	/*
 	 * Classic shims, in index.html's dependency order. They run inside the
@@ -155,6 +168,7 @@
 	/** @type {{root: HTMLElement, text: HTMLElement, actions: HTMLElement} | null} */
 	var banner = null;
 	var appWaiter = null;
+	var appWaiters = [];
 
 	function describeError(error) {
 		if (!error) return "unknown";
@@ -180,6 +194,7 @@
 		events: events,
 		blocked: 0,
 		request: null,
+		restore: { saved: [], offered: false, restored: [] },
 		openInNewWindow: openInNewWindow
 	};
 	window.__MYOBS_POPOUT = api;
@@ -341,6 +356,8 @@
 				if (found) {
 					frame.file = found;
 					win.__MYOBS_POPOUT_WINDOW.file = found;
+					rememberPopout(found);
+					watchFrameClose(frame);
 					record("file", { file: found });
 					return;
 				}
@@ -349,6 +366,108 @@
 		}
 
 		window.setTimeout(poll, 0);
+	}
+
+	// ---------------------------------------------------------------------
+	// Last-session popouts
+	// ---------------------------------------------------------------------
+
+	function restoreKey() {
+		var boot = window.__MYOBS || {};
+		var id = boot.vaultId || (window.app && window.app.appId) || "vault";
+		return RESTORE_KEY_PREFIX + id;
+	}
+
+	function readSavedPopouts() {
+		try {
+			var raw = localStorage.getItem(restoreKey());
+			if (!raw) return [];
+			var list = JSON.parse(raw);
+			if (!Array.isArray(list)) return [];
+			return list
+				.filter(function (path) {
+					return typeof path === "string" && path.length > 0;
+				})
+				.slice(-RESTORE_MAX);
+		} catch (err) {
+			return [];
+		}
+	}
+
+	function writeSavedPopouts(list) {
+		try {
+			if (!list.length) localStorage.removeItem(restoreKey());
+			else localStorage.setItem(restoreKey(), JSON.stringify(list.slice(-RESTORE_MAX)));
+		} catch (err) {
+			/* private mode: restore is a convenience, not a requirement */
+		}
+	}
+
+	function rememberPopout(path) {
+		if (!path) return;
+		var list = readSavedPopouts();
+		var index = list.indexOf(path);
+		if (index !== -1) list.splice(index, 1);
+		list.push(path);
+		writeSavedPopouts(list);
+		api.restore.saved = list.slice();
+	}
+
+	function forgetPopout(path) {
+		if (!path) return;
+		var list = readSavedPopouts();
+		var index = list.indexOf(path);
+		if (index === -1) return;
+		list.splice(index, 1);
+		writeSavedPopouts(list);
+		api.restore.saved = list.slice();
+	}
+
+	function popoutFileExists(path) {
+		var app = window.app;
+		return !!(
+			path &&
+			app &&
+			app.vault &&
+			typeof app.vault.getAbstractFileByPath === "function" &&
+			app.vault.getAbstractFileByPath(path)
+		);
+	}
+
+	function popoutIsLive(path) {
+		for (var i = 0; i < api.frames.length; i += 1) {
+			var frame = api.frames[i];
+			if (frame && frame.file === path && frame.win && !frame.win.closed) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Drop paths that no longer exist, are already open, or are in the middle
+	 * of being reopened. The result is what the restore button should show.
+	 */
+	function restorablePopouts() {
+		var all = readSavedPopouts();
+		var keep = all.filter(function (path) {
+			return popoutFileExists(path);
+		});
+		if (keep.length !== all.length) writeSavedPopouts(keep);
+		return keep.filter(function (path) {
+			return !popoutIsLive(path) && !pendingRestore[path];
+		});
+	}
+
+	function watchFrameClose(frame) {
+		if (!frame || frame.closeWatched) return;
+		frame.closeWatched = true;
+		var timer = window.setInterval(function () {
+			if (!frame.win || !frame.win.closed) return;
+			window.clearInterval(timer);
+			// A reload closes every popout on the way out. Those paths are the
+			// last session and must survive; only a user close forgets them.
+			if (!unloading) forgetPopout(frame.file);
+			if (api.restore.offered) presentRestore();
+		}, 1000);
 	}
 
 	// ---------------------------------------------------------------------
@@ -671,6 +790,84 @@
 		banner = null;
 	}
 
+	/**
+	 * Obsidian's own boot restore calls window.open() without a gesture, so
+	 * every saved popout is blocked. Offer the paths we tracked last session as
+	 * an explicit entry; each click has its own gesture and opens one window.
+	 */
+	function presentRestore() {
+		if (!window.app || api.request) return;
+		var paths = restorablePopouts();
+		api.restore.saved = readSavedPopouts();
+		if (!paths.length) {
+			if (api.restore.offered) {
+				api.restore.offered = false;
+				hideNotice();
+			}
+			return;
+		}
+		api.restore.offered = true;
+		showNotice({
+			text: "上次工作階段有 " + paths.length + " 個新視窗。瀏覽器需要你的點擊才能開啟。",
+			actions: [
+				{
+					label: "還原上個視窗 (" + paths.length + ")",
+					run: function () {
+						restoreNext();
+					}
+				}
+			]
+		});
+	}
+
+	function restoreNext() {
+		var paths = restorablePopouts();
+		if (!paths.length) {
+			api.restore.offered = false;
+			hideNotice();
+			return;
+		}
+		var path = paths[0];
+		pendingRestore[path] = true;
+		var opened = openPopoutFile(path);
+		if (!opened) {
+			delete pendingRestore[path];
+			presentRestore();
+			return;
+		}
+		api.restore.restored.push(path);
+		window.setTimeout(function () {
+			delete pendingRestore[path];
+			presentRestore();
+		}, RESTORE_PENDING_MS);
+	}
+
+	/**
+	 * Restore one saved path into a fresh popout window. `getLeaf("window")`
+	 * asks Obsidian for a real popout leaf, then openFile() fills it; this is
+	 * more direct than openLinkText(), which has to resolve the path as a link
+	 * first (and failed for paths containing spaces in the restore harness).
+	 */
+	function openPopoutFile(path) {
+		var app = window.app;
+		if (!app || !app.workspace || !app.vault) return false;
+		var file = app.vault.getAbstractFileByPath(path);
+		if (!file) return false;
+		try {
+			var leaf = app.workspace.getLeaf("window");
+			var opened = leaf.openFile(file, { active: true });
+			if (opened && typeof opened.catch === "function") {
+				opened.catch(function (err) {
+					record("restore-open-failed", { file: path, error: describeError(err) });
+				});
+			}
+			return true;
+		} catch (err) {
+			record("restore-open-failed", { file: path, error: describeError(err) });
+			return false;
+		}
+	}
+
 	function notifyBlocked() {
 		showNotice({
 			text:
@@ -777,13 +974,46 @@
 			callback();
 			return;
 		}
+		appWaiters.push(callback);
 		if (appWaiter) return;
 		var deadline = Date.now() + APP_WAIT_MS;
 		appWaiter = window.setInterval(function () {
 			if (window.app || Date.now() > deadline) {
 				window.clearInterval(appWaiter);
 				appWaiter = null;
-				if (window.app) callback();
+				var callbacks = appWaiters;
+				appWaiters = [];
+				if (window.app) {
+					for (var i = 0; i < callbacks.length; i += 1) callbacks[i]();
+				}
+			}
+		}, APP_POLL_MS);
+	}
+
+	/**
+	 * openPopoutLeaf() only produces a populated window after the workspace
+	 * layout exists. The restore button must not appear before that, or an
+	 * early click opens an empty popout.
+	 */
+	function workspaceReady() {
+		return !!(
+			window.app &&
+			window.app.workspace &&
+			window.app.workspace.rootSplit &&
+			document.querySelector(".workspace-leaf")
+		);
+	}
+
+	function whenWorkspaceReady(callback) {
+		if (workspaceReady()) {
+			callback();
+			return;
+		}
+		var deadline = Date.now() + APP_WAIT_MS;
+		var timer = window.setInterval(function () {
+			if (workspaceReady() || Date.now() > deadline) {
+				window.clearInterval(timer);
+				if (workspaceReady()) callback();
 			}
 		}, APP_POLL_MS);
 	}
@@ -829,4 +1059,22 @@
 	installOpenInterceptor();
 	presentRequest();
 	window.addEventListener("hashchange", presentRequest);
+
+	// Popout windows close on reload; remember that this is not a user close,
+	// otherwise the last-session list would be erased on every reload.
+	window.addEventListener("beforeunload", function () {
+		unloading = true;
+	});
+	window.addEventListener("pagehide", function () {
+		unloading = true;
+	});
+	window.addEventListener("pageshow", function () {
+		unloading = false;
+	});
+
+	whenAppReady(function () {
+		whenWorkspaceReady(function () {
+			window.setTimeout(presentRestore, RESTORE_NOTICE_DELAY_MS);
+		});
+	});
 })();

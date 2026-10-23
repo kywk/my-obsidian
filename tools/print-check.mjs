@@ -441,14 +441,9 @@ try {
     })`),
   );
 
-  await cdp.send(
-    'Emulation.setDeviceMetricsOverride',
-    { width: 600, height: 900, deviceScaleFactor: 1, mobile: false },
-    sessionId,
-  );
-  await waitForValue('window.Platform && window.Platform.isPhone === true', 10000);
-  const narrow = JSON.parse(
-    await evaluate(`JSON.stringify({
+  const readPlatform = async () =>
+    JSON.parse(
+      await evaluate(`JSON.stringify({
       width: innerWidth,
       isPhone: Platform.isPhone,
       isTablet: Platform.isTablet,
@@ -459,9 +454,30 @@ try {
       applied: window.__MYOBS_PLATFORM_BRIDGE.applied,
       overrides: window.__MYOBS_PLATFORM_BRIDGE.overrides,
       bodyPhone: document.body.classList.contains('is-phone'),
+      bodyTablet: document.body.classList.contains('is-tablet'),
       events: window.__MYOBS_PLATFORM_BRIDGE.events.slice(-4),
     })`),
+    );
+
+  // Tablets are a supported target: 600px and wider must keep the desktop
+  // layout (ribbon/splits/tabs), not the phone fallback.
+  await cdp.send(
+    'Emulation.setDeviceMetricsOverride',
+    { width: 820, height: 1180, deviceScaleFactor: 1, mobile: false },
+    sessionId,
   );
+  await waitForValue('window.Platform && window.Platform.isPhone === false', 10000);
+  const tablet = await readPlatform();
+
+  // Phones are not a target; below 600px the old fallback still applies so a
+  // narrow window remains usable instead of overflowing.
+  await cdp.send(
+    'Emulation.setDeviceMetricsOverride',
+    { width: 480, height: 900, deviceScaleFactor: 1, mobile: false },
+    sessionId,
+  );
+  await waitForValue('window.Platform && window.Platform.isPhone === true', 10000);
+  const phone = await readPlatform();
 
   await cdp.send(
     'Emulation.setDeviceMetricsOverride',
@@ -469,21 +485,9 @@ try {
     sessionId,
   );
   await waitForValue('window.Platform && window.Platform.isPhone === false', 10000);
-  const wideAfter = JSON.parse(
-    await evaluate(`JSON.stringify({
-      width: innerWidth,
-      isPhone: Platform.isPhone,
-      isTablet: Platform.isTablet,
-      canDisplayRibbon: Platform.canDisplayRibbon,
-      canSplit: Platform.canSplit,
-      canStackTabs: Platform.canStackTabs,
-      applied: window.__MYOBS_PLATFORM_BRIDGE.applied,
-      overrides: window.__MYOBS_PLATFORM_BRIDGE.overrides,
-      bodyPhone: document.body.classList.contains('is-phone'),
-    })`),
-  );
+  const wideAfter = await readPlatform();
 
-  facts.platform = { wideBefore, narrow, wideAfter };
+  facts.platform = { wideBefore, tablet, phone, wideAfter };
   check(
     'widthDesktopDefault',
     wideBefore.width === 1280 &&
@@ -493,18 +497,29 @@ try {
     wideBefore,
   );
   check(
-    'widthPhone',
-    narrow.width === 600 &&
-      narrow.isPhone === true &&
-      narrow.isTablet === false &&
-      narrow.applied === true &&
-      narrow.overrides?.isPhone === true &&
-      narrow.overrides?.isTablet === false &&
-      narrow.bodyPhone === true &&
-      narrow.canDisplayRibbon === false &&
-      narrow.canSplit === false &&
-      narrow.canStackTabs === false,
-    narrow,
+    'widthTabletDesktopLayout',
+    tablet.width === 820 &&
+      tablet.isPhone === false &&
+      tablet.applied === false &&
+      tablet.overrides === null &&
+      tablet.canDisplayRibbon === true &&
+      tablet.canSplit === true &&
+      tablet.canStackTabs === true,
+    tablet,
+  );
+  check(
+    'widthPhoneFallback',
+    phone.width === 480 &&
+      phone.isPhone === true &&
+      phone.isTablet === false &&
+      phone.applied === true &&
+      phone.overrides?.isPhone === true &&
+      phone.overrides?.isTablet === false &&
+      phone.bodyPhone === true &&
+      phone.canDisplayRibbon === false &&
+      phone.canSplit === false &&
+      phone.canStackTabs === false,
+    phone,
   );
   check(
     'widthRestored',
@@ -542,6 +557,61 @@ try {
       noNoteRun.result?.error?.code === 'NO_ACTIVE_NOTE' &&
       noNoteRun.callsAfter === noNoteRun.callsBefore,
     noNoteRun,
+  );
+
+  // A resize only flips flags; the tablet must also work when the page boots
+  // at tablet width. Reload with the viewport already at 820x1180 and confirm
+  // Obsidian builds the desktop surface, not the phone toolbar/navbar. This is
+  // last because the reload replaces the page-level print probe.
+  await cdp.send(
+    'Emulation.setDeviceMetricsOverride',
+    { width: 820, height: 1180, deviceScaleFactor: 1, mobile: false },
+    sessionId,
+  );
+  await cdp.send('Page.navigate', { url: `${URL_BASE}/` }, sessionId);
+  const tabletBootReady = await waitForValue(
+    '!!(window.app && app.workspace && document.querySelector(".workspace-leaf") && app.workspace.getActiveFile())',
+    30000,
+  );
+  await sleep(1500);
+  const tabletBoot = JSON.parse(
+    await evaluate(`JSON.stringify({
+      width: innerWidth,
+      isPhone: Platform.isPhone,
+      isTablet: Platform.isTablet,
+      applied: window.__MYOBS_PLATFORM_BRIDGE.applied,
+      bodyPhone: document.body.classList.contains('is-phone'),
+      bodyTablet: document.body.classList.contains('is-tablet'),
+      ribbon: !!document.querySelector('.workspace-ribbon'),
+      ribbonVisible: (function () {
+        const el = document.querySelector('.workspace-ribbon');
+        if (!el) return false;
+        const style = getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+      })(),
+      rootSplit: !!document.querySelector('.workspace-split.mod-root'),
+      tabs: document.querySelectorAll('.workspace-tab-container').length,
+      mobileToolbar: document.querySelectorAll('.mobile-toolbar').length,
+      mobileNavbar: document.querySelectorAll('.mobile-navbar').length,
+      mobileDrawer: document.querySelectorAll('.workspace-drawer').length,
+    })`),
+  );
+  facts.tabletBoot = { ready: tabletBootReady === true, ...tabletBoot };
+  check(
+    'tabletBootDesktopUi',
+    tabletBootReady === true &&
+      tabletBoot.width === 820 &&
+      tabletBoot.isPhone === false &&
+      tabletBoot.applied === false &&
+      tabletBoot.bodyPhone === false &&
+      tabletBoot.ribbon === true &&
+      tabletBoot.ribbonVisible === true &&
+      tabletBoot.rootSplit === true &&
+      tabletBoot.tabs > 0 &&
+      tabletBoot.mobileToolbar === 0 &&
+      tabletBoot.mobileNavbar === 0 &&
+      tabletBoot.mobileDrawer === 0,
+    tabletBoot,
   );
 } catch (err) {
   report.fatal = String(err && err.stack ? err.stack : err);

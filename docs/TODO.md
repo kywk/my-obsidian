@@ -29,12 +29,12 @@
 | 外部變更熱重載 | `[x]` | `check:hotreload` 4/4 |
 | 衝突副本 + 使用者可見通知 | `[x]` | `check:notices` 10/10 |
 | 斷線偵測與重連補償 | `[x]` | `check:resilience` 8/8 |
-| 多視窗 popout | `[x]` | `check:popout` 8/8、`check:parity` 8/8 |
+| 多視窗 popout | `[x]` | `check:popout` 10/10（含重新載入後還原）、`check:parity` 8/8 |
 | 選單列／右鍵選單 | `[x]` | `check:menu` 8/8 |
-| 列印／Export to PDF | `[x]` | `check:print` 19/19、`check:dialog` 14/14 |
+| 列印／Export to PDF | `[x]` | `check:print` 21/21、`check:dialog` 14/14 |
 | 附件（圖片／PDF／Range／編碼檔名） | `[x]` | `check:attachment` 10/10 |
 | PWA manifest + 靜態資產 SW | `[x]` | `check:print` |
-| 手機寬度降級 | `[x]` | `check:print`（1280 / 600px） |
+| 桌面／平板版面 | `[x]` | `check:print`（1280 / 820 / 480px；>=600px 不降級） |
 | 啟動器 + 環境檢查 | `[x]` | `npm run doctor` |
 | 本地 dev mode（跳過同意畫面） | `[x]` | `--dev`／`DEV_MODE=1`；只允許 loopback；不寫 config |
 | harness vault 守門與隔離 | `[x]` | fail-closed `MYOBS_LIVE_VAULT`；每支一份複本 |
@@ -74,13 +74,15 @@
 
 ### 功能缺口（有明確觸發條件）
 
-- [ ] **popout 開機自動還原** —— 瀏覽器要求使用者手勢，會被擋。
-      目前顯示提示條讓使用者點一下。要更順的話需要「上次工作區」的明確 UI 入口。
+- [x] **popout 開機自動還原** —— 瀏覽器要求使用者手勢，無法全自動。
+      已改為把上次成功的 popout 路徑存進 localStorage，重新載入後提供
+      「還原上個視窗 (N)」提示條；一次點擊開一個（`check:popout` 10/10）。
 - [ ] **popout 沒有頂部選單列** —— 右鍵選單可用（走主 realm 的 fallback），但 menubar 只在主視窗。
 - [ ] **Export to PDF 的 modal 設定不套用** —— pageSize／landscape／margins／includeName／scale
       由瀏覽器列印分頁決定。
 - [ ] **Service worker 不快取 `/`** —— 離線可以載入靜態資產，但不能離線開 app（刻意：boot 注入每次要重算）。
-- [ ] **寬度跨 768 只改旗標** —— 已建立的桌面 workspace 不會長出 mobile toolbar；600px 開機才是完整路徑。
+- [x] **平板／桌面寬度策略** —— >=600px 維持 Obsidian 原生桌面／平板版面（820px 已驗收）；
+      <600px 才是手機 fallback（非支援目標）。跨門檻仍只改平台旗標，不重建既有的 workspace layout。
 
 ### 偵測盲區
 
