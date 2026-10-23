@@ -79,9 +79,22 @@
 		return String(reason);
 	}
 
+	/**
+	 * ResizeObserver loop notifications are reported as window error events by
+	 * Chrome even though the page is healthy. Treating them as fatal turns a
+	 * benign layout warning into a full-screen block (seen in popout-check with
+	 * Chrome 156). They still reach the console, just not the fatal overlay.
+	 */
+	function isBenignError(message) {
+		return /^ResizeObserver loop (?:limit exceeded|completed with undelivered notifications)\.?$/i.test(
+			String(message || "").trim()
+		);
+	}
+
 	window.addEventListener(
 		"error",
 		function (event) {
+			if (isBenignError(event.message)) return;
 			var target = event.target;
 			if (target && target !== window && (target.src || target.href)) {
 				fatal("資源載入失敗", (target.tagName || "resource") + " " + (target.src || target.href));

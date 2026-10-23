@@ -10,6 +10,9 @@
  *   WATCH_DISABLED  set to 1 to skip chokidar
  *   AUTH_TOKEN      optional; requires cookie myobs_token=<AUTH_TOKEN>
  *   MYOBS_CONFIG    consent config file (default ~/.config/my-obsidian/config.json)
+ *   DEV_MODE        set to 1 to bypass the consent screen for local development.
+ *                   Reads the renderer literal from vendor/obsidian/app.js into
+ *                   memory; refuses any non-loopback HOST. Never writes config.
  *   TERMS_ACK       optional; the acknowledgement string itself. When neither
  *                   this nor a stored config holds one, GET / serves the consent
  *                   page (GET /consent, POST /api/consent) and /obsidian/app.js
@@ -38,8 +41,10 @@ import { createVaultWatcher } from './watch.js';
 import { registerProxyRoutes } from './proxy.js';
 import { registerPluginRoutes } from './plugins.js';
 import {
+  assertDevModeHost,
   createConsentState,
   defaultConfigPath,
+  readTermsFromVendor,
   registerConsentRoutes,
   withConsentTerms,
 } from './consent.js';
@@ -223,6 +228,9 @@ export async function buildBootInfo(options) {
  * @param {string} [options.termsText] Highest-precedence acknowledgement text.
  * @param {boolean} [options.termsAccepted] Only `false` is meaningful: close the
  *   gate regardless of every text source. Never marks a vault accepted.
+ * @param {boolean} [options.devMode] Local-only bypass: read the renderer's own
+ *   acknowledgement literal from vendorDir and inject it without a consent
+ *   screen. Never writes the value to disk. Defaults to DEV_MODE === '1'.
  * @param {string} [options.envTermsText] Overrides TERMS_ACK (for tests).
  * @param {string} [options.configPath] Consent config; defaults to MYOBS_CONFIG
  *   or ~/.config/my-obsidian/config.json.
@@ -248,6 +256,8 @@ export async function buildApp(options = {}) {
   }
 
   const vault = await openVault(vaultPath);
+  const vendorDir = options.vendorDir ?? DEFAULT_VENDOR_DIR;
+  const devMode = options.devMode ?? process.env.DEV_MODE === '1';
   // Acceptance is "the operator supplied the acknowledgement text", not "some
   // variable is set". TERMS_ACK=1 used to mark the vault accepted while feeding
   // "1" to the renderer's sendSync("terms"), which makes Obsidian call
@@ -255,8 +265,9 @@ export async function buildApp(options = {}) {
   // therefore derived from the text on every read, and the config file is
   // re-read so a POST /api/consent applies without a restart.
   const configPath = options.configPath ?? defaultConfigPath();
+  const devTerms = devMode ? readTermsFromVendor(vendorDir) : undefined;
   const consent = createConsentState({
-    termsText: options.termsText,
+    termsText: options.termsText ?? devTerms,
     termsAccepted: options.termsAccepted,
     envTermsText:
       options.envTermsText !== undefined ? options.envTermsText : process.env.TERMS_ACK,
@@ -268,7 +279,6 @@ export async function buildApp(options = {}) {
       : process.env.AUTH_TOKEN || undefined;
   const watchEnabled =
     options.watch ?? process.env.WATCH_DISABLED !== '1';
-  const vendorDir = options.vendorDir ?? DEFAULT_VENDOR_DIR;
   const shimDir = options.shimDir ?? DEFAULT_SHIM_DIR;
   const runtimeIndexPath = options.runtimeIndexPath ?? DEFAULT_RUNTIME_INDEX;
 
@@ -283,6 +293,10 @@ export async function buildApp(options = {}) {
     logger: options.logger ?? false,
     bodyLimit: options.bodyLimit ?? 64 * 1024 * 1024,
   });
+
+  // Exposed for diagnostics and tests; the terms gate itself is already
+  // resolved above. No string is ever copied into this flag.
+  app.decorate('devMode', devMode);
 
   await app.register(websocket);
 
@@ -479,17 +493,34 @@ export async function start() {
     process.exit(1);
   }
   const host = process.env.HOST || '127.0.0.1';
+  const devMode = process.env.DEV_MODE === '1';
+  if (devMode) {
+    try {
+      assertDevModeHost(host);
+    } catch (err) {
+      console.error(`server 啟動失敗: ${/** @type {Error} */ (err).message}`);
+      process.exit(1);
+    }
+  }
 
   let app;
   try {
-    app = await buildApp({ logger: true });
+    app = await buildApp({ logger: true, devMode });
     await app.listen({ host, port });
   } catch (err) {
     console.error(`server 啟動失敗: ${/** @type {Error} */ (err).message}`);
     process.exit(1);
   }
 
-  if (!app.consent.termsAccepted) {
+  if (devMode) {
+    app.log.warn(
+      [
+        'DEV MODE：跳過授權同意畫面，直接從 vendor/obsidian/app.js 讀取字串注入 renderer。',
+        '只允許 loopback；不要用 --host 0.0.0.0 或反向代理對外暴露。',
+        '字串只存在記憶體，不寫入 config、不輸出到 log。',
+      ].join('\n'),
+    );
+  } else if (!app.consent.termsAccepted) {
     app.log.warn(
       [
         '尚未完成授權聲明確認：GET / 顯示同意頁，/obsidian/app.js 回 403。',

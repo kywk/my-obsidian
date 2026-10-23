@@ -37,6 +37,7 @@ import path from 'node:path';
 
 import {
   Cdp,
+  assertNotLiveVault,
   attachToPage,
   clickAt,
   evalInPage,
@@ -48,11 +49,6 @@ import {
   waitForPage,
 } from './lib/cdp.mjs';
 
-// Harnesses write into whichever vault they are pointed at, so they refuse the
-// operator's real vault and demand a copy. Point MYOBS_LIVE_VAULT at your own
-// vault to keep the guard; forks should set it instead of editing this line.
-const LIVE_VAULT =
-  process.env.MYOBS_LIVE_VAULT ?? path.join(process.env.HOME ?? '', 'kywk', 'obsidian');
 const CLIPBOARD_LABELS = {
   // English and zh-TW (the two locales this runtime is used in); the check is
   // a subset test over the labels the menu actually rendered.
@@ -100,9 +96,7 @@ function parseArgs(argv) {
 const args = parseArgs(process.argv.slice(2));
 if (!args.vault) throw new Error('--vault <dir> is required (a copy, never the live vault)');
 args.vault = path.resolve(args.vault);
-if (args.vault === LIVE_VAULT || args.vault.startsWith(LIVE_VAULT + path.sep)) {
-  throw new Error(`refusing to run against the live vault: ${args.vault}`);
-}
+assertNotLiveVault(args.vault);
 if (!fs.existsSync(path.join(args.vault, '.obsidian'))) {
   throw new Error(`not an Obsidian vault (no .obsidian): ${args.vault}`);
 }

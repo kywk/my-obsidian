@@ -11,7 +11,7 @@
 
 | 能力 | 狀態 | 驗收 |
 |---|---|---|
-| 官方 renderer boot（1.14.4） | `[x]` | `check:spike` 8/8 |
+| 官方 renderer boot（1.14.4） | `[x]` | `check:spike` 9/9 |
 | 編輯／檔案樹／搜尋／圖譜／Canvas／命令面板 | `[x]` | 官方實作，隨 renderer 提供 |
 | 社群外掛載入（L2） | `[x]` | 16 個已啟用載入 14 個（另 2 個需 `child_process`） |
 | 社群外掛安裝／更新／卸載 | `[x]` | `check:plugin-install` 6/6（真實網路） |
@@ -25,6 +25,8 @@
 | PWA manifest + 靜態資產 SW | `[x]` | `check:print` |
 | 手機寬度降級 | `[x]` | `check:print`（1280 / 600px） |
 | 啟動器 + 環境檢查 | `[x]` | `npm run doctor` |
+| 本地 dev mode（跳過同意畫面） | `[x]` | `--dev`／`DEV_MODE=1`；只允許 loopback；不寫 config |
+| harness vault 守門與隔離 | `[x]` | fail-closed `MYOBS_LIVE_VAULT`；每支一份複本 |
 
 ---
 
@@ -109,15 +111,22 @@
 ## 怎麼驗
 
 ```bash
-npm test                      # 251 個單元測試
-npm run check:spike           # 其餘 10 支見 README「驗收」
+npm --prefix packages/server ci # 第一次或 package-lock 變更後
+npm test                        # 254 個單元測試
+npm run check:spike             # 其餘 10 支見 README「驗收」
 ```
 
-全部只對 vault **複本**執行。harness 會用 `MYOBS_LIVE_VAULT`（預設為作者的本機路徑，fork 請自行設定）
-拒絕指向真實 vault；換環境請自行設定。
+全部只對 vault **複本**執行。harness 的守門是 fail-closed：必須設定
+`MYOBS_LIVE_VAULT` 指向真實 vault，否則直接拒絕。**每支 harness 用一份乾淨複本**；
+`attachment` 會留 fixture、`menu`/`popout` 會改 `workspace-server.json`，共用同一份
+會讓後面的 harness 繼承前一支的狀態。
 
 ```bash
-DEST=/tmp/vault-copy && mkdir -p "$DEST"
-rsync -a --exclude='.git/' --exclude='.docusaurus/' --exclude='node_modules/' ~/my-vault/ "$DEST/"
+export MYOBS_LIVE_VAULT="$HOME/my-vault"   # 你的真實 vault
+BASE=/tmp/vault-copy && mkdir -p "$BASE"
+rsync -a --exclude='.git/' --exclude='.docusaurus/' --exclude='node_modules/' \
+  "$MYOBS_LIVE_VAULT/" "$BASE/"
+
+DEST=$(mktemp -d) && rsync -a "$BASE/" "$DEST/"
 npm run check:spike -- --vault "$DEST"
 ```

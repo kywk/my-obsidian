@@ -46,6 +46,10 @@ Server 在 HTML 中注入一段同步可用的 JSON，**必須早於任何 shim 
 `termsAccepted` 為 false 時，server **不得提供 app.js**，且 `GET /` 改回同意頁
 （與 `GET /consent` 同一頁）。
 
+本機開發可用 `--dev` / `DEV_MODE=1`：server 在啟動時從 `vendor/obsidian/app.js`
+讀出同一段字串，只存在記憶體並注入；**只允許 loopback**，不寫入 config。
+這是 server-local 的行為，不是 wire contract 的例外。
+
 ---
 
 ## 2. `POST /api/fs`

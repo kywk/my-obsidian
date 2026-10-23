@@ -28,6 +28,61 @@ import { fileURLToPath } from 'node:url';
  */
 export const MIN_TERMS_LENGTH = 40;
 
+/**
+ * Read the renderer's own acknowledgement literal at runtime.
+ *
+ * This is only used by local dev mode. The value never leaves memory and is
+ * never written to the repo or the consent config (AGENTS.md rule 3). The
+ * marker and the quote-walk are the same ones tools/lib/cdp.mjs uses; keeping
+ * them identical means dev mode injects exactly what the harnesses inject.
+ *
+ * @param {string} vendorDir directory containing app.js (not the .asar)
+ * @returns {string}
+ */
+export function readTermsFromVendor(vendorDir) {
+  const appJs = path.join(vendorDir, 'app.js');
+  const source = fs.readFileSync(appJs, 'utf8');
+  const marker = '.ipcRenderer.sendSync("terms")';
+  const at = source.indexOf(marker);
+  if (at < 0) {
+    throw new Error(`terms gate not found in ${appJs}; re-run "npm run vendor"`);
+  }
+  const open = source.lastIndexOf('"', at - 2);
+  const close = source.lastIndexOf('"', open - 1);
+  const value = source.slice(close + 1, open);
+  if (!value || value.length < MIN_TERMS_LENGTH) {
+    throw new Error(
+      `terms literal in ${appJs} looks truncated (${value.length} chars); re-run "npm run vendor"`,
+    );
+  }
+  return value;
+}
+
+/**
+ * Dev mode bypasses the operator consent screen, so it must never listen on a
+ * reachable interface. This is a guardrail, not a substitute for TLS.
+ *
+ * @param {string} host
+ * @returns {boolean}
+ */
+export function isLoopbackHost(host) {
+  if (typeof host !== 'string') return false;
+  const value = host.trim().toLowerCase();
+  return value === 'localhost' || value === '::1' || /^127\./.test(value);
+}
+
+/**
+ * @param {string} host
+ */
+export function assertDevModeHost(host) {
+  if (!isLoopbackHost(host)) {
+    throw new Error(
+      `DEV_MODE/--dev 只允許 loopback（127.0.0.1、::1、localhost）；` +
+        `目前是 ${host}。要對外服務請關掉 dev mode 並完成同意畫面。`,
+    );
+  }
+}
+
 export const DEFAULT_CONSENT_HTML = fileURLToPath(
   new URL('../../runtime/consent.html', import.meta.url),
 );

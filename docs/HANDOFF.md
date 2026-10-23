@@ -28,13 +28,16 @@
 
 ---
 
-## 現況（釘在 `ce36d2a`，不要重新探索）
+## 現況（2026-10-23 baseline 修正）
 
-- 9 個 commit、73 個追蹤檔案、working tree clean
+- 11 個 commit、76 個追蹤檔案（以 `git log -1` / `git ls-files | wc -l` 為準）
 - Node 22；server 與 shim 都是 **plain JavaScript，沒有 build step**
-- 251 個單元測試 + **11 支零依賴 CDP harness**（驅動本機 Chrome，不需要 Playwright）
+- 254 個單元測試 + **11 支零依賴 CDP harness**（104 項斷言；`check:spike` 9 項）
 - renderer 是**未修改**的官方 Obsidian 1.14.4（`app.js` 3,942,126 bytes），
   由 `npm run vendor` 在操作者機器上解包，`vendor/` 不進版控
+- CI 只跑單元測試與語法檢查；harness 需要本機 vault 複本、`vendor/` 與 Chrome
+- 本機開發可用 `npm run dev -- --vault <copy>`（或 `npm start -- --vault <copy> --dev`）：
+  跳過同意畫面、只允許 loopback、從 `vendor/obsidian/app.js` 讀字串注入，不寫入 config
 
 實測數字（作者的本機 vault，10,150 檔 / 341 MB）：
 
@@ -53,24 +56,29 @@
 指向真實 vault 會被拒絕 —— 那是輔助，不是保證，複本請自己建。
 
 ```bash
-DEST=/tmp/vault-copy && mkdir -p "$DEST"
-rsync -a --exclude='.git/' --exclude='.docusaurus/' --exclude='node_modules/' ~/my-vault/ "$DEST/"
+# 第一次或 package-lock 變更後
+npm --prefix packages/server ci
 
-npm test                                  # 251/251
-npm run check:spike      -- --vault "$DEST"   # 8
-npm run check:hotreload  -- --vault "$DEST"   # 4
-npm run check:menu       -- --vault "$DEST"   # 8
-npm run check:print      -- --vault "$DEST"   # 19
-npm run check:popout     -- --vault "$DEST"   # 8
-npm run check:dialog     -- --vault "$DEST"   # 14
-npm run check:notices    -- --vault "$DEST"   # 10
-npm run check:resilience -- --vault "$DEST"   # 8
-npm run check:parity     -- --vault "$DEST"   # 8
-npm run check:attachment -- --vault "$DEST"   # 10
-npm run check:plugin-install -- --vault "$DEST"  # 6，需連外網
+# 真實 vault：守門會拒絕它，也用它當複本來源
+export MYOBS_LIVE_VAULT="$HOME/my-vault"
+
+BASE=/tmp/vault-copy && mkdir -p "$BASE"
+rsync -a --exclude='.git/' --exclude='.docusaurus/' --exclude='node_modules/' \
+  "$MYOBS_LIVE_VAULT/" "$BASE/"
+
+npm test                                  # 254/254
+
+# 每支 harness 一份乾淨複本。attachment 會留 fixture；menu/popout 會改
+# workspace-server.json。共用一份會讓後面的 harness 繼承前一棒的狀態。
+for name in spike hotreload attachment popout menu print dialog notices resilience parity plugin-install; do
+  DEST=$(mktemp -d)
+  rsync -a "$BASE/" "$DEST/"
+  npm run "check:$name" -- --vault "$DEST"
+done
 ```
 
 **完成判準**：每一支都回報 `passed: true`（`plugin-install` 需要真實網路，離線時如實說明）。
+`check:spike` 現在是 9 項（新增良性 `ResizeObserver` 錯誤不得開 fatal 的斷言）。
 任何一支失敗 → 先修到全綠，再談新功能。
 
 harness 的慣例：`--port <n>`（Chrome 用 `n + 1000`）、`--json <path>` 保留完整輸出、
@@ -80,7 +88,7 @@ harness 的慣例：`--port <n>`（Chrome 用 `n + 1000`）、`--json <path>` �
 
 ## 已經踩過的陷阱（會再咬你一次）
 
-只列最貴的六個，完整版在 `DESIGN.md` §11。
+只列最貴的八個，完整版在 `DESIGN.md` §11。
 
 1. **`policy` 不可為空物件** —— renderer 會無條件覆蓋自己的寬鬆預設，
    結果是**所有社群外掛靜默不載入**，沒有任何錯誤訊息（§11.3）。
@@ -94,6 +102,10 @@ harness 的慣例：`--port <n>`（Chrome 用 `n + 1000`）、`--json <path>` �
    `file-created`，`Vault.onChange` 不檢查既有節點 → 重複節點。用 `reconcileFile`（§11.13）。
 6. **列印會是空白頁** —— `app.css` 的 `@media print` 隱藏整個 `.app-container`，
    必須把 active view 搬進 `body > div.print`（§11.10）。
+7. **良性 `ResizeObserver` 錯誤會蓋掉整個 app** —— Chrome 會把它當 `error` 事件送出；
+   全螢幕 fatal handler 必須過濾，否則 popout 等互動全部被擋（§11.15）。
+8. **harness 不能共用一份 vault 複本** —— `attachment` 留 fixture、`menu`/`popout`
+   改 `workspace-server.json`；共用會讓下一支 harness 繼承閱讀模式與舊分頁（§11.16）。
 
 ---
 

@@ -16,6 +16,7 @@ import fs from 'node:fs';
 
 import {
   Cdp,
+  assertNotLiveVault,
   launchChrome,
   readTermsFromVendor,
   sleep,
@@ -37,6 +38,7 @@ function parseArgs(argv) {
 const args = parseArgs(process.argv.slice(2));
 if (!args.vault) throw new Error('--vault is required (never the live vault)');
 if (!fs.existsSync(args.vault)) throw new Error(`vault does not exist: ${args.vault}`);
+assertNotLiveVault(args.vault);
 
 const URL_BASE = `http://127.0.0.1:${args.port}`;
 const report = {

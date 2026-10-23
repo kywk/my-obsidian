@@ -25,6 +25,7 @@ import path from 'node:path';
 
 import {
   Cdp,
+  assertNotLiveVault,
   REPO_ROOT,
   launchChrome,
   readTermsFromVendor,
@@ -35,11 +36,6 @@ import {
 const PROBE_ID = 'myobs-hotreload-probe';
 const FIXTURE_DIR = path.join(REPO_ROOT, 'tools', 'fixtures', 'hotreload-probe');
 const PROBE_REL = `.obsidian/plugins/${PROBE_ID}/main.js`;
-// Harnesses write into whichever vault they are pointed at, so they refuse the
-// operator's real vault and demand a copy. Point MYOBS_LIVE_VAULT at your own
-// vault to keep the guard; forks should set it instead of editing this line.
-const LIVE_VAULT =
-  process.env.MYOBS_LIVE_VAULT ?? path.join(process.env.HOME ?? '', 'kywk', 'obsidian');
 
 // ---------------------------------------------------------------- arguments
 
@@ -66,17 +62,6 @@ function parseArgs(argv) {
  *
  * @param {string} vault
  */
-function assertNotLiveVault(vault) {
-  const resolved = path.resolve(vault);
-  const real = fs.realpathSync(resolved);
-  for (const candidate of [resolved, real]) {
-    if (candidate === LIVE_VAULT) {
-      throw new Error(
-        `refusing to run against the live vault (${LIVE_VAULT}); pass a copy of it instead`,
-      );
-    }
-  }
-}
 
 /**
  * Install the probe plugin and make sure the vault's community-plugins.json

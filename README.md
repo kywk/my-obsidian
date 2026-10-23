@@ -6,7 +6,7 @@
 外面的 Electron／Node 依賴由 13 個 shim 取代。不是重寫的編輯器，也不是遠端桌面串流。
 
 ```
-Obsidian 1.14.4 · Node 22 · 251 個單元測試 · 11 支端到端 harness（103 項斷言）
+Obsidian 1.14.4 · Node 22 · 254 個單元測試 · 11 支端到端 harness（104 項斷言）
 ```
 
 ---
@@ -42,17 +42,20 @@ Obsidian 1.14.4 · Node 22 · 251 個單元測試 · 11 支端到端 harness（1
 ## 快速開始
 
 ```bash
-# 1. 取得 Obsidian renderer
+# 1. 安裝 server 依賴
+npm --prefix packages/server ci
+
+# 2. 取得 Obsidian renderer
 #    預設從本機已安裝的 /Applications/Obsidian.app 解包（--from 可指定 .asar）
 npm run vendor
 
-# 2. 檢查環境（會逐項告訴你缺什麼、要跑哪個指令）
+# 3. 檢查環境（會逐項告訴你缺什麼、要跑哪個指令）
 npm run doctor -- --vault ~/my-vault
 
-# 3. 啟動
+# 4. 啟動
 npm start -- --vault ~/my-vault
 
-# 4. 開 http://127.0.0.1:3000/
+# 5. 開 http://127.0.0.1:3000/
 ```
 
 ### 常用參數
@@ -61,6 +64,8 @@ npm start -- --vault ~/my-vault
 npm start -- --vault ~/my-vault --port 8080
 npm start -- --vault ~/my-vault --host 0.0.0.0 --auth-token "$(openssl rand -hex 24)"
 npm start -- --vault ~/my-vault --no-watch      # 關掉檔案監看（debug 用）
+npm run dev -- --vault ~/my-vault               # 本地開發：跳過同意畫面（只允許 loopback）
+npm start -- --vault ~/my-vault --dev           # 同上
 ```
 
 ### 前置需求
@@ -82,6 +87,19 @@ npm start -- --vault ~/my-vault --no-watch      # 關掉檔案監看（debug 用
 
 完成後就是完整的 Obsidian。vault 裡只會多一個檔案：`.obsidian/workspace-server.json`
 （與桌面版的 `workspace.json` 分開存放，互不干擾）。
+
+### 本地開發：`--dev`
+
+```bash
+npm run dev -- --vault ~/my-vault
+# 或 npm start -- --vault ~/my-vault --dev
+```
+
+`--dev` 會**跳過同意畫面**：server 在啟動時從 `vendor/obsidian/app.js` 讀出字串，
+只存在記憶體並注入 renderer，不寫入 config、也不輸出到 log。
+
+限制：**只允許 loopback**（`127.0.0.1`、`::1`、`localhost`）。搭配
+`--host 0.0.0.0` 或反向代理對外會直接拒絕啟動。這是方便本機開發，不是對外服務的模式。
 
 ---
 
@@ -116,6 +134,8 @@ npm start -- --vault ~/my-vault --no-watch      # 關掉檔案監看（debug 用
   `--host 0.0.0.0` 加上沒有 auth token，等於把整個 vault 交給任何能連到那個埠的人。
 - `--auth-token` 是**單一共用 token**（cookie `myobs_token`），不是多使用者登入系統。
   它擋得住隨機掃描，擋不住已經拿到 token 的人。
+- `--dev` 只適用於本機：它會跳過同意畫面，且拒絕非 loopback 的綁定位址。
+  不要用反向代理把 dev mode 暴露出去。
 - **TLS 由你負責**：把服務放在反向代理（Caddy / nginx / Cloudflare Tunnel）後面。
   直接暴露在公網上是不安全的。
 - server 端的 `/api/proxy` 是給 Obsidian 的社群外掛 Browse 用的：deny by default、
@@ -170,6 +190,7 @@ npm start -- --vault ~/my-vault --no-watch      # 關掉檔案監看（debug 用
 | `/obsidian/app.js` 回 403、看不到 app | 尚未完成授權聲明確認 | 開 `/` 完成同意畫面 |
 | 卡在載入畫面 | 聲明字串不符，或 vault 路徑不可讀 | 畫面上會有全螢幕錯誤與具體原因 |
 | 伺服器啟動就退出 | 沒給 `VAULT_PATH`，或 `vendor/` 不存在 | `npm run doctor` |
+| harness 說 `MYOBS_LIVE_VAULT is not set` | 這是 fail-closed 守門，不是錯誤 | 設成你的真實 vault，再指向複本 |
 | 所有社群外掛都沒載入（無錯誤訊息） | `policy` 注入不完整 | 已修；若復發見 `DESIGN.md` §11.3 |
 | 附件（圖片／PDF）全部 404 | `file-url` 回錯來源 | 已修；見 `DESIGN.md` §11.7 |
 | 外掛熱重載沒反應 | 被關掉了 | 移除 `localStorage["myobs-plugin-watch"]` |
@@ -215,9 +236,10 @@ vendor/obsidian/     gitignore；由 scripts/fetch-obsidian.mjs 產生
 ## 驗收
 
 ```bash
-npm test                      # 單元測試（251 項）
+npm --prefix packages/server ci # 第一次或 package-lock 變更後
+npm test                        # 單元測試（254 項）
 
-npm run check:spike           # boot / >5000 檔 / metadata cache / 文字與二進位往返 / 冷啟
+npm run check:spike           # boot / >5000 檔 / metadata cache / 文字與二進位往返 / 冷啟 / 良性錯誤不蓋畫面
 npm run check:hotreload       # WS、筆記外部變更、plugin 熱重載、回音過濾
 npm run check:attachment      # /v/*、Range、位元組一致、編碼檔名
 npm run check:popout          # 多視窗、同一 app 物件、獨立寫入
@@ -230,12 +252,23 @@ npm run check:parity          # popout realm、popout 匯出、proxy、上傳
 npm run check:plugin-install  # 真實網路：Browse → Install → Enable
 ```
 
-**全部只對 vault 複本執行**，不會碰你的真實 vault：
+**全部只對 vault 複本執行**，不會碰你的真實 vault。harness 的守門是 fail-closed：
+必須設定 `MYOBS_LIVE_VAULT` 指向真實 vault，否則直接拒絕執行。
 
 ```bash
-DEST=/tmp/vault-copy && mkdir -p "$DEST"
-rsync -a --exclude='.git/' --exclude='.docusaurus/' --exclude='node_modules/' ~/my-vault/ "$DEST/"
-npm run check:spike -- --vault "$DEST"
+export MYOBS_LIVE_VAULT="$HOME/my-vault"   # 換成你的真實 vault
+
+BASE=/tmp/vault-copy && mkdir -p "$BASE"
+rsync -a --exclude='.git/' --exclude='.docusaurus/' --exclude='node_modules/' \
+  "$MYOBS_LIVE_VAULT/" "$BASE/"
+
+# 每支 harness 一份乾淨複本：attachment 會留 fixture、menu/popout 會改
+# workspace-server.json，共用同一份會讓後面的 harness 繼承前一支的狀態。
+for name in spike hotreload attachment popout menu print dialog notices resilience parity plugin-install; do
+  DEST=$(mktemp -d)
+  rsync -a "$BASE/" "$DEST/"
+  npm run "check:$name" -- --vault "$DEST"
+done
 ```
 
 ---

@@ -42,16 +42,17 @@ import path from 'node:path';
 import {
   Cdp,
   REPO_ROOT,
+  assertNotLiveVault,
   launchChrome,
+  liveVaultPath,
   readTermsFromVendor,
   sleep,
   startServer,
 } from './lib/cdp.mjs';
 
-// See the LIVE_VAULT comment in the other harnesses: never point this at the
-// operator's real vault. MYOBS_LIVE_VAULT overrides it.
-const SOURCE_VAULT =
-  process.env.MYOBS_LIVE_VAULT ?? path.join(process.env.HOME ?? '', 'kywk', 'obsidian');
+// The live vault is only ever read: it is the rsync source when --vault does
+// not already look like a vault. Harnesses still refuse to run against it.
+const SOURCE_VAULT = liveVaultPath();
 const FIXTURE_DIR = path.join(REPO_ROOT, 'tools/fixtures/attachments');
 
 /** Vault subdirectories that receive the fixtures. */
@@ -351,9 +352,7 @@ async function main() {
   if (!args.vault) {
     throw new Error('--vault is required (point it at a vault copy, never the live vault)');
   }
-  if (path.resolve(args.vault) === path.resolve(SOURCE_VAULT)) {
-    throw new Error('refusing to run against the live vault; pass a copy');
-  }
+  assertNotLiveVault(args.vault);
   if (!fs.existsSync(FIXTURE_DIR)) {
     throw new Error(`fixtures missing: ${FIXTURE_DIR}`);
   }

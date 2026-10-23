@@ -186,6 +186,11 @@ server config，再由此注入（契約欄位為 `termsText`，見 `CONTRACTS.m
 
 未同意時服務**照常啟動**，只是 `/` 回同意頁、`/obsidian/app.js` 回 403，並在 log 輸出警告與 config 路徑。
 
+**本地開發模式（`--dev` / `DEV_MODE=1`）**：在啟動時從 `vendor/obsidian/app.js`
+讀出同一段字串，只存在記憶體並注入 renderer，不寫入 config、不輸出到 log。
+它**只允許 loopback**（`127.0.0.1`、`::1`、`localhost`）；非 loopback 直接拒絕啟動。
+這是為了本機反覆開發，不是對外服務的替代方案；對外服務仍須完成同意畫面。
+
 **必須理解的界線**：把 bundle 送進他人的瀏覽器，在字面上就落在該聲明的射程內。
 私有自用（自己機器、自己 vault）與對外提供服務是兩件不同的事，後者需要 Obsidian team 的
 明示同意。此判斷由操作者承擔。
@@ -197,12 +202,12 @@ server config，再由此注入（契約欄位為 `termsText`，見 `CONTRACTS.m
 
 ## 9. 驗收層次與測試
 
-四支零依賴的 CDP harness（驅動本機 Chrome，不需要 Playwright）＋一套 `node:test`：
+11 支零依賴的 CDP harness（驅動本機 Chrome，不需要 Playwright）＋一套 `node:test`：
 
 | 層 | 指令 | 項目數 | 涵蓋 |
 |---|---|---|---|
-| 單元 | `cd packages/server && npm test` | 251 | fs API、conflict、auth、consent、files/`/v/*`、watch token、proxy（含 DNS 硬化）、plugins、static、PUT 串流 |
-| 1 | `node tools/spike-check.mjs --vault <複本>` | 8 | boot、>5000 檔、metadata cache、文字往返、二進位往返、冷啟、workspace 隔離、零例外 |
+| 單元 | `cd packages/server && npm test` | 254 | fs API、conflict、auth、consent、files/`/v/*`、watch token、proxy（含 DNS 硬化）、plugins、static、PUT 串流 |
+| 1 | `node tools/spike-check.mjs --vault <複本>` | 9 | boot、>5000 檔、metadata cache、文字往返、二進位往返、冷啟、workspace 隔離、零例外、良性錯誤不蓋畫面 |
 | 2 | `node tools/hotreload-check.mjs` | 4 | WS 連線、筆記外部變更、plugin 熱重載、回音過濾 |
 | 3 | `node tools/attachment-check.mjs` | 全部 | `/v/*` URL 形狀、位元組一致、瀏覽器實際解碼、Range、pdfjs、編碼檔名 |
 | 4 | `node tools/popout-check.mjs` | 8 | popout 開啟、同一 app 物件、指定筆記、獨立寫入、真實鍵盤輸入、deep link |
@@ -566,4 +571,56 @@ listAll() { this.files = {}; return this.listRecursive(""); }   // ← 先清空
   在 vault 裡種出 **0 byte 筆記** —— 按下「顯示保留的舊版本」反而製造垃圾檔。
   必須用 `getAbstractFileByPath` / `getFirstLinkpathDest` 解析後 `leaf.openFile()`，
   找不到就誠實說找不到。這個 bug 在 stress 中被 `copiesOnDisk` 掃描抓到。
+
+### 11.15 良性 `ResizeObserver` 錯誤會變成全螢幕 fatal
+
+`index.html` 的 global `error` handler 原本把所有 `error` 事件都當成 boot 失敗。
+Chrome 156 在 layout 時會送出：
+
+```
+ResizeObserver loop completed with undelivered notifications.
+```
+
+這是良性警告，但 handler 會開全螢幕 fatal overlay，後續點擊（例如 `#popout=` 的
+「開啟」按鈕）全部被蓋住。`tools/popout-check.mjs` 在乾淨 workspace 下重現 3/4 次失敗，
+fatal detail 就是這一句。
+
+修正：`isBenignError()` 過濾 `ResizeObserver loop limit exceeded` 與
+`ResizeObserver loop completed with undelivered notifications`；`spike-check`
+新增第 9 項斷言，主動 dispatch 這個 `ErrorEvent` 並要求 fatal 不可出現。
+原則是：**boot 期的錯誤才全螢幕；layout 噪音只進 console。**
+
+### 11.16 harness 的 vault 守門與隔離
+
+兩個獨立的問題在同一天一起爆開：
+
+1. **守門預設路徑是錯的。** 所有 harness 原本預設一個不存在的
+   `$HOME/vault`，但實際 vault 可能在 `$HOME/Sync/vault`，而 `$HOME/Sync`
+   本身也可以是 vault。預設值不存在，等於沒有守門；而且各 harness 有些只比對等值、
+   有些比對前綴。
+2. **共用一份複本會交叉汙染。** `attachment-check` 留下 `_attach*` fixture，
+   `menu-check` 改 `appearance.json`，每支都留 `.obsidian/workspace-server.json`。
+   照 `HANDOFF.md` 的單一 `$DEST` 連跑，`menu` 會變 7/8（筆記停在閱讀模式）、
+   `popout` 鍵盤輸入失敗、`parity` 會選到同名 fixture 而開錯筆記。
+
+修正：
+
+- `tools/lib/cdp.mjs` 的 `liveVaultPath()` **fail-closed**：`MYOBS_LIVE_VAULT`
+  未設定就拒絕執行；`assertNotLiveVault()` 同時拒絕 live vault 的父目錄與子目錄，
+  並用 `realpath` 比對。
+- `startServer()` 對每個 vault 的第一次啟動清除 `workspace-server.json` /
+  `workspace-mobile.json`；resilience 的第二次啟動不清，保留它要測的 client state。
+- 驗收流程改為**每支 harness 一份乾淨複本**（README §驗收、HANDOFF）。
+
+### 11.17 Chrome 的 `chrome://settings/help` 會搶走 about:blank popout
+
+`window.open("about:blank", …)` 開出的 popout 在 Chrome 156 上偶爾會被 Chrome
+自己的 About 頁導航，target 仍然是同一個 targetId，但文件已不是 Obsidian。
+`parity-check` 的右鍵選單因此找不到 `.myobs-menu-panel`。這是瀏覽器環境行為，
+不是 renderer 導航。
+
+修正：`launchChrome()` 加 `--disable-component-update`、
+`--disable-background-networking`、`--disable-features=ChromeWhatsNewUI,…`；
+`listPageTargets()` 過濾 `chrome://` / `devtools://` / `edge://` target。
+若未來 Chrome 改行為，先檢查 harness 的 target 清單，不要先懷疑 popout 實作。
 

@@ -34,6 +34,7 @@ import path from 'node:path';
 
 import {
   Cdp,
+  assertNotLiveVault,
   clickAt,
   evalInPage,
   launchChrome,
@@ -47,8 +48,6 @@ import {
 // Harnesses write into whichever vault they are pointed at, so they refuse the
 // operator's real vault and demand a copy. Point MYOBS_LIVE_VAULT at your own
 // vault to keep the guard; forks should set it instead of editing this line.
-const LIVE_VAULT =
-  process.env.MYOBS_LIVE_VAULT ?? path.join(process.env.HOME ?? '', 'kywk', 'obsidian');
 
 /** Partial report printed when the harness throws before finishing. */
 let activeReport = null;
@@ -105,14 +104,8 @@ function parseArgs(argv) {
 
 function assertDisposableVault(vault) {
   if (!vault) throw new Error('--vault is required (pass a copy, never the live vault)');
-  const absolute = fs.realpathSync(vault);
+  const absolute = assertNotLiveVault(vault);
   if (!fs.statSync(absolute).isDirectory()) throw new Error(`not a directory: ${absolute}`);
-  const live = fs.existsSync(LIVE_VAULT) ? fs.realpathSync(LIVE_VAULT) : LIVE_VAULT;
-  if (absolute === live) {
-    throw new Error(
-      `refusing to run against the live vault ${absolute}; create a copy with rsync first`,
-    );
-  }
   return absolute;
 }
 

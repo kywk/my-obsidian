@@ -7,7 +7,7 @@
  * names, and so a missing piece reports *which* piece instead of a stack trace.
  *
  *   node scripts/start.mjs --vault ~/my-vault [--port 3000] [--host 0.0.0.0]
- *                          [--auth-token secret] [--no-watch]
+ *                          [--auth-token secret] [--no-watch] [--dev]
  *   node scripts/start.mjs --doctor [--vault ...]
  */
 
@@ -16,6 +16,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { isLoopbackHost } from '../packages/server/src/consent.js';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SERVER_ENTRY = path.join(REPO_ROOT, 'packages/server/src/index.js');
@@ -26,10 +28,19 @@ const CONFIG_PATH =
   path.join(os.homedir(), '.config', 'my-obsidian', 'config.json');
 
 function parseArgs(argv) {
-  const out = { doctor: false, vault: null, port: null, host: null, authToken: null, watch: true };
+  const out = {
+    doctor: false,
+    dev: false,
+    vault: null,
+    port: null,
+    host: null,
+    authToken: null,
+    watch: true,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--doctor') out.doctor = true;
+    else if (a === '--dev') out.dev = true;
     else if (a === '--vault') out.vault = argv[++i];
     else if (a === '--port') out.port = argv[++i];
     else if (a === '--host') out.host = argv[++i];
@@ -52,6 +63,8 @@ const USAGE = `用法：
   --host <addr>         預設 127.0.0.1。設 0.0.0.0 前請先讀 README 的安全說明
   --auth-token <token>  共用 token；設定後所有請求都要帶 cookie myobs_token
   --no-watch            關閉檔案監看（debug 用）
+  --dev                 本地開發模式：跳過同意畫面，從 vendor/obsidian/app.js 讀取字串注入；
+                        只允許 loopback，不會寫入 config
   --doctor              只做環境檢查，不啟動
 
 第一次使用請先跑 \`npm run vendor\` 取得 Obsidian renderer。`;
@@ -105,7 +118,10 @@ function runDoctor(args) {
   }
 
   const consent = readConsent();
-  if (consent.accepted) {
+  const devMode = args.dev || process.env.DEV_MODE === '1';
+  if (devMode) {
+    lines.push('consent     dev mode（跳過同意畫面；只允許 loopback；不寫入 config）');
+  } else if (consent.accepted) {
     lines.push(`consent     已設定（${consent.path}）`);
   } else if (consent.broken) {
     lines.push(`consent     設定檔無法解析（${consent.broken}）`);
@@ -185,6 +201,14 @@ function main() {
 
   const port = args.port ?? process.env.PORT ?? '3000';
   const host = args.host ?? process.env.HOST ?? '127.0.0.1';
+  const devMode = args.dev || process.env.DEV_MODE === '1';
+  if (devMode && !isLoopbackHost(host)) {
+    console.error(
+      `--dev / DEV_MODE 只允許 loopback（127.0.0.1、::1、localhost）；目前是 ${host}。\n` +
+        '要對外服務請關掉 dev mode 並完成同意畫面。',
+    );
+    return 1;
+  }
 
   const env = {
     ...process.env,
@@ -194,16 +218,20 @@ function main() {
   };
   if (args.authToken) env.AUTH_TOKEN = args.authToken;
   if (!args.watch) env.WATCH_DISABLED = '1';
+  if (devMode) env.DEV_MODE = '1';
   if (process.env.TERMS_ACCEPTED === undefined) delete env.TERMS_ACCEPTED;
 
   const consent = readConsent();
   console.log(`vault   ${vault}`);
   console.log(`bind    http://${host}:${port}/`);
   if (args.authToken) console.log('auth    已啟用（cookie myobs_token）');
-  if (host !== '127.0.0.1' && host !== 'localhost') {
+  if (devMode) {
+    console.log('dev     已啟用（跳過同意畫面；只允許 loopback；不寫入 config）');
+  }
+  if (!isLoopbackHost(host)) {
     console.log('警告    你綁定了非 loopback 位址。沒有 auth token 時，能連到這個埠的人都能讀寫整個 vault。');
   }
-  if (!consent.accepted) {
+  if (!consent.accepted && !devMode) {
     console.log('提醒    尚未完成授權聲明確認，開 http://%s:%s/ 會看到同意畫面。', host, port);
   }
 

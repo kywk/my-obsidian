@@ -11,6 +11,7 @@
   "scripts": {
     "vendor": "node scripts/fetch-obsidian.mjs",
     "start": "node scripts/start.mjs",
+    "dev": "node scripts/start.mjs --dev",
     "doctor": "node scripts/start.mjs --doctor",
     "test": "npm --prefix packages/server test",
     "test:unit": "npm --prefix packages/server test",

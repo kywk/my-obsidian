@@ -20,6 +20,7 @@ import path from 'node:path';
 
 import {
   Cdp,
+  assertNotLiveVault,
   launchChrome,
   readTermsFromVendor,
   sleep,
@@ -52,6 +53,7 @@ async function main() {
   if (!fs.existsSync(args.vault)) {
     throw new Error(`vault does not exist: ${args.vault}`);
   }
+  assertNotLiveVault(args.vault);
 
   const terms = readTermsFromVendor();
   const wsJsonPath = path.join(args.vault, '.obsidian', 'workspace.json');
@@ -287,6 +289,27 @@ async function main() {
 
     // 7. no unhandled exceptions
     report.criteria.noExceptions = report.console.exceptions.length === 0;
+
+    // 8. a ResizeObserver loop warning must not become the full-screen fatal
+    // overlay. Chrome reports it as an ErrorEvent even when layout is healthy;
+    // treating it as fatal blocks every subsequent click (DESIGN.md §11.15).
+    report.facts.benignError = await evaluate(`(function () {
+      var fatal = document.getElementById('myobs-fatal');
+      var before = !!(fatal && !fatal.hidden && fatal.style.display !== 'none');
+      window.dispatchEvent(new ErrorEvent('error', {
+        message: 'ResizeObserver loop completed with undelivered notifications.',
+        filename: 'http://127.0.0.1/myobs-benign-error',
+        lineno: 0,
+        colno: 0
+      }));
+      return {
+        before: before,
+        after: !!(fatal && !fatal.hidden && fatal.style.display !== 'none'),
+        detail: (document.getElementById('myobs-fatal-detail') || {}).textContent || ''
+      };
+    })()`);
+    report.criteria.benignErrorIgnored =
+      report.facts.benignError?.before === false && report.facts.benignError?.after === false;
 
     report.facts.vaultName = await evaluate('app.vault.getName()').catch(() => null);
     // Node globals the renderer references 184 times; if Buffer is missing, every

@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/server/package-lock.json
+
+      - name: Install server dependencies
+        run: npm --prefix packages/server ci
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Syntax check (plain JavaScript, no build step)
+        run: git ls-files '*.js' '*.mjs' | xargs -n1 node --check
+
+# End-to-end harnesses stay local: they need a real vault copy, a local
+# Obsidian installation (vendor/), and Chrome. See docs/HANDOFF.md.

@@ -34,6 +34,7 @@ import path from 'node:path';
 
 import {
   Cdp,
+  assertNotLiveVault,
   activateTarget,
   attachToPage,
   clickAt,
@@ -46,11 +47,6 @@ import {
   waitForPage,
 } from './lib/cdp.mjs';
 
-// Harnesses write into whichever vault they are pointed at, so they refuse the
-// operator's real vault and demand a copy. Point MYOBS_LIVE_VAULT at your own
-// vault to keep the guard; forks should set it instead of editing this line.
-const LIVE_VAULT =
-  process.env.MYOBS_LIVE_VAULT ?? path.join(process.env.HOME ?? '', 'kywk', 'obsidian');
 
 // ---------------------------------------------------------------- arguments
 
@@ -80,17 +76,6 @@ function parseArgs(argv) {
 }
 
 /** @param {string} vault */
-function assertNotLiveVault(vault) {
-  const resolved = path.resolve(vault);
-  const real = fs.realpathSync(resolved);
-  for (const candidate of [resolved, real]) {
-    if (candidate === LIVE_VAULT) {
-      throw new Error(
-        `refusing to run against the live vault (${LIVE_VAULT}); pass a copy of it instead`,
-      );
-    }
-  }
-}
 
 // ------------------------------------------------------------------- main
 
@@ -349,12 +334,17 @@ async function main() {
       if (!leaf) return { ok: false, why: 'no leaf in the popout document' };
       await leaf.openFile(file, { active: true });
       await new Promise(function (resolve) { window.setTimeout(resolve, 600); });
-      let owned = null;
+      // The popout can hold more than one leaf (the cloned host tab plus the
+      // note opened here), so scan every popout leaf instead of taking the
+      // first one. First-leaf ordering made this fail on vaults with fixture
+      // copies that share a basename.
+      var paths = [];
       app.workspace.iterateAllLeaves(function (candidate) {
-        if (owned || !candidate.containerEl || candidate.containerEl.ownerDocument !== document) return;
-        if (candidate.view && candidate.view.file) owned = candidate.view.file.path;
+        if (!candidate.containerEl || candidate.containerEl.ownerDocument !== document) return;
+        if (candidate.view && candidate.view.file) paths.push(candidate.view.file.path);
       });
-      return { ok: true, activePath: (app.workspace.getActiveFile() || {}).path || null, ownedPath: owned };
+      var owned = paths.indexOf(${JSON.stringify(popoutNote)}) !== -1 ? ${JSON.stringify(popoutNote)} : (paths[0] || null);
+      return { ok: true, activePath: (app.workspace.getActiveFile() || {}).path || null, ownedPath: owned, paths: paths };
     })()`);
     report.facts.popoutNoteOpened = opened;
     if (!opened?.ok || opened.ownedPath !== popoutNote) {
@@ -687,21 +677,60 @@ async function main() {
     // user right-clicking always has the window focused first, so put the
     // focus back with a real click before the right-click.
     await activateTarget(cdp, popout.targetId);
+    await popoutEvaluate(`(function () {
+      var scroller = document.querySelector('.workspace-leaf.mod-active .cm-scroller') ||
+        document.querySelector('.cm-scroller');
+      if (scroller) scroller.scrollTop = 0;
+      return true;
+    })()`).catch(() => {});
+    await sleep(250);
     const editorRect = await popoutEvaluate(`(function () {
-      const el =
-        document.querySelector('.workspace-leaf.mod-active .cm-content') ||
-        document.querySelector('.workspace-leaf.mod-active .markdown-preview-view') ||
-        document.querySelector('.cm-content') ||
-        document.querySelector('.markdown-preview-view');
-      if (!el) return null;
-      const r = el.getBoundingClientRect();
-      if (r.width < 20 || r.height < 20) return null;
-      return { x: r.left + Math.min(80, r.width / 2), y: r.top + Math.min(60, r.height / 2) };
+      function usable(el) {
+        if (!el) return null;
+        if (el.closest && el.closest('.internal-embed, .pdf-embed, .pdf-container')) return null;
+        var r = el.getBoundingClientRect();
+        if (r.width < 20 || r.height < 5) return null;
+        var x = r.left + Math.min(30, r.width / 2);
+        var offsets = [Math.min(8, r.height / 2), Math.min(r.height / 2, r.height - 2)];
+        for (var k = 0; k < offsets.length; k++) {
+          var y = r.top + offsets[k];
+          var hit = document.elementFromPoint(x, y);
+          if (!hit) continue;
+          if (hit.closest && (hit.closest('.cm-content') || hit.closest('.markdown-preview-view'))) {
+            return { x: x, y: y };
+          }
+        }
+        return null;
+      }
+      var leaf = document.querySelector('.workspace-leaf.mod-active') || document;
+      var lines = leaf.querySelectorAll('.cm-content .cm-line');
+      for (var i = 0; i < lines.length; i++) {
+        var hit = usable(lines[i]);
+        if (hit) return hit;
+      }
+      var paras = leaf.querySelectorAll('.markdown-preview-view p, .markdown-preview-view li');
+      for (var j = 0; j < paras.length; j++) {
+        var para = usable(paras[j]);
+        if (para) return para;
+      }
+      return usable(leaf.querySelector('.cm-content')) || usable(leaf.querySelector('.markdown-preview-view'));
     })()`);
     report.facts.popoutEditorRect = editorRect;
     let menuFact = null;
     if (editorRect) {
-      await clickAt(cdp, popoutSessionId, editorRect, { button: 'left' });
+      // Focus the editor without a mouse click: the popout note has embedded
+      // PDFs, and a left-click on a point that later lands on an embed opens
+      // the PDF viewer instead of keeping the markdown editor active.
+      await popoutEvaluate(`(function () {
+        var leaf = app.workspace.activeLeaf;
+        if (leaf && leaf.view && leaf.view.editor && typeof leaf.view.editor.focus === 'function') {
+          leaf.view.editor.focus();
+          return true;
+        }
+        var el = document.querySelector('.workspace-leaf.mod-active .cm-content');
+        if (el && typeof el.focus === 'function') { el.focus(); return true; }
+        return false;
+      })()`).catch(() => {});
       await sleep(250);
       await clickAt(cdp, popoutSessionId, editorRect, { button: 'right' });
       const deadline = Date.now() + 8000;
@@ -729,6 +758,38 @@ async function main() {
         await sleep(200);
       }
       if (!menuFact) {
+        report.facts.popoutMenuDebug = await popoutEvaluate(`JSON.stringify((function () {
+          var rect = ${JSON.stringify(editorRect)};
+          var hit = document.elementFromPoint(rect.x, rect.y);
+          var stack = document.elementsFromPoint ? document.elementsFromPoint(rect.x, rect.y) : [];
+          var candidates = [];
+          document.querySelectorAll('.workspace-leaf.mod-active .cm-line, .workspace-leaf.mod-active .markdown-preview-view p, .workspace-leaf.mod-active .markdown-preview-view li').forEach(function (el) {
+            if (candidates.length >= 8) return;
+            var r = el.getBoundingClientRect();
+            candidates.push({ tag: el.tagName, cls: String(el.className).slice(0, 60), text: String(el.textContent).slice(0, 40), x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height), embed: !!(el.closest && el.closest('.internal-embed, .pdf-embed, .pdf-container')) });
+          });
+          var menu = window.__MYOBS_MENU || {};
+          return {
+            hasFocus: document.hasFocus(),
+            activeTag: document.activeElement ? document.activeElement.tagName : null,
+            activeClass: document.activeElement ? String(document.activeElement.className).slice(0, 80) : null,
+            hitTag: hit ? hit.tagName : null,
+            hitClass: hit ? String(hit.className).slice(0, 120) : null,
+            hitText: hit ? String(hit.textContent).slice(0, 80) : null,
+            stack: stack.slice(0, 6).map(function (el) { return el.tagName + '.' + String(el.className).slice(0, 50); }),
+            candidates: candidates,
+            viewType: app.workspace.activeLeaf && app.workspace.activeLeaf.view && app.workspace.activeLeaf.view.getViewType ? app.workspace.activeLeaf.view.getViewType() : null,
+            panels: document.querySelectorAll('.myobs-menu-panel').length,
+            htmlMenus: document.querySelectorAll('.menu, .menu-container').length,
+            menuInstalled: menu.installed === true,
+            menuEvents: (menu.events || []).slice(-12),
+            lastPopup: menu.lastPopup || null,
+            fatal: (function () {
+              var el = document.getElementById('myobs-fatal');
+              return !!(el && !el.hidden && el.style.display !== 'none');
+            })()
+          };
+        })())`).catch((err) => `debug failed: ${err.message}`);
         // Diagnostics only: if the menu went to the host document, say so.
         report.facts.hostContextMenu = await evaluate(`(function () {
           const panels = Array.from(document.querySelectorAll('.myobs-menu-panel')).filter(function (el) {

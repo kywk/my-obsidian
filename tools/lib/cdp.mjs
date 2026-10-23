@@ -20,6 +20,76 @@ export const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 export const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
 /**
+ * The operator's real vault. Harnesses write into the vault they are pointed
+ * at, so this is a hard boundary (AGENTS.md rule 4). There is deliberately no
+ * default: an unset MYOBS_LIVE_VAULT must fail closed instead of silently
+ * disabling the guard on a machine with a different home layout.
+ *
+ * @returns {string} absolute, symlink-resolved live vault path
+ */
+export function liveVaultPath() {
+  const raw = process.env.MYOBS_LIVE_VAULT;
+  if (!raw || !raw.trim()) {
+    throw new Error(
+      'MYOBS_LIVE_VAULT is not set. Point it at your real vault (the path harnesses must refuse), ' +
+        'for example: export MYOBS_LIVE_VAULT="$HOME/Obsidian/MyVault"',
+    );
+  }
+  const expanded = raw.startsWith('~/') ? path.join(os.homedir(), raw.slice(2)) : raw;
+  const absolute = path.resolve(expanded);
+  try {
+    return fs.realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
+/**
+ * Refuse the live vault, and refuse a vault that contains the live vault.
+ * The second check matters when the real vault is a parent directory (for
+ * example ~/Sync contains ~/Sync/vault).
+ *
+ * @param {string} vault
+ * @returns {string} absolute, symlink-resolved vault path
+ */
+export function assertNotLiveVault(vault) {
+  const absolute = path.resolve(vault);
+  let real = absolute;
+  try {
+    real = fs.realpathSync(absolute);
+  } catch {
+    // A missing path is handled by the caller's own existsSync check.
+  }
+  const live = liveVaultPath();
+  const contains = (a, b) => a === b || a.startsWith(b + path.sep);
+  if (contains(real, live) || contains(live, real)) {
+    throw new Error(
+      `refusing to run against the live vault or its parent: ${real} ` +
+        `(MYOBS_LIVE_VAULT=${live}); pass a copy under a separate directory`,
+    );
+  }
+  return real;
+}
+
+/**
+ * Start each harness from a clean layout. .obsidian/workspace-server.json is
+ * browser-side state; leaving it behind makes the next harness inherit tabs,
+ * reading mode, and popout state. Only the first start for a vault resets it,
+ * so resilience-check can restart the server without losing the client state
+ * it is testing.
+ */
+const preparedVaults = new Set();
+export function resetWorkspaceState(vault) {
+  for (const name of ['workspace-server.json', 'workspace-mobile.json']) {
+    try {
+      fs.rmSync(path.join(vault, '.obsidian', name), { force: true });
+    } catch {
+      // A missing .obsidian directory is fine; the server will create it.
+    }
+  }
+}
+
+/**
  * @param {number} ms
  * @returns {Promise<void>}
  */
@@ -76,12 +146,17 @@ export function readTermsFromVendor() {
  * @returns {Promise<{ child: import('node:child_process').ChildProcess, logs: string[] }>}
  */
 export async function startServer(vault, port, terms, extraEnv = {}) {
+  const safeVault = assertNotLiveVault(vault);
+  if (!preparedVaults.has(safeVault)) {
+    resetWorkspaceState(safeVault);
+    preparedVaults.add(safeVault);
+  }
   const child = spawn(process.execPath, ['src/index.js'], {
     cwd: path.join(REPO_ROOT, 'packages/server'),
     env: {
       ...process.env,
       ...extraEnv,
-      VAULT_PATH: vault,
+      VAULT_PATH: safeVault,
       PORT: String(port),
       HOST: '127.0.0.1',
       TERMS_ACK: terms,
@@ -187,6 +262,14 @@ export async function launchChrome(port) {
       '--disable-gpu',
       '--disable-background-timer-throttling',
       '--disable-renderer-backgrounding',
+      // Chrome 156 periodically opens chrome://settings/help in a blank
+      // window. That can steal an about:blank popout target and make
+      // parity-check fail with a page that has no Obsidian UI at all.
+      '--disable-component-update',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-sync',
+      '--disable-features=ChromeWhatsNewUI,MediaRouter,OptimizationHints',
       '--window-size=1440,900',
       'about:blank',
     ],
@@ -246,7 +329,11 @@ export async function newPage(cdp, url = 'about:blank') {
 export async function listPageTargets(cdp) {
   const { targetInfos } = await cdp.send('Target.getTargets');
   return (targetInfos ?? [])
-    .filter((t) => t.type === 'page')
+    .filter(
+      (t) =>
+        t.type === 'page' &&
+        !/^(chrome|devtools|edge):\/\//.test(t.url),
+    )
     .map((t) => ({ targetId: t.targetId, url: t.url, title: t.title, attached: t.attached }));
 }
 
