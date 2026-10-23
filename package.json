@@ -25,6 +25,16 @@
     "check:plugin-install": "node tools/plugin-install-check.mjs",
     "check:notices": "node tools/notices-check.mjs",
     "check:resilience": "node tools/resilience-check.mjs",
-    "check:parity": "node tools/parity-check.mjs"
+    "check:parity": "node tools/parity-check.mjs",
+    "check:plugin-support": "node tools/plugin-support-check.mjs",
+    "audit:plugins": "node tools/plugin-audit.mjs",
+    "check:templater": "node tools/templater-check.mjs",
+    "check:geo-story-map": "node tools/geo-story-map-check.mjs",
+    "check:vault-feed-reader": "node tools/vault-feed-reader-check.mjs",
+    "check:kanban": "node tools/kanban-check.mjs",
+    "check:dataview": "node tools/dataview-check.mjs",
+    "check:tasks": "node tools/tasks-check.mjs",
+    "check:quickadd": "node tools/quickadd-check.mjs",
+    "check:origin-echo": "node tools/origin-echo-check.mjs"
   }
 }
