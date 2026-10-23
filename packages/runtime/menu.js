@@ -45,6 +45,12 @@
 		barEl: null,
 		barButtons: [],
 		barDoc: null,
+		barVisible: false,
+		toggleEl: null,
+		returnFocus: null,
+		mountTimer: null,
+		mountObserver: null,
+		altPending: false,
 		// The panel currently shown from the bar; `parent` links a submenu.
 		rootPanel: null,
 		// Popup opened through Menu.popup() (the native fallback).
@@ -267,27 +273,38 @@
 	// ------------------------------------------------------------------
 
 	var CSS = [
-		"." + BAR_CLASS + "{",
-		"  position:relative;z-index:2147482990;display:flex;align-items:stretch;",
-		"  flex:0 0 auto;height:28px;box-sizing:border-box;",
-		"  padding:0 6px;gap:1px;user-select:none;-webkit-user-select:none;",
+		"#myobs-application-menu." + BAR_CLASS + "{",
+		"  position:fixed;z-index:2147482990;display:flex;align-items:center;",
+		"  height:36px;max-width:calc(100vw - 12px);box-sizing:border-box;",
+		"  padding:2px;gap:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;user-select:none;-webkit-user-select:none;",
 		"  font-family:var(--font-interface,system-ui,-apple-system,sans-serif);",
 		"  font-size:var(--font-ui-smaller,12px);",
 		"  color:var(--text-muted,var(--text-normal,#ccc));",
 		"  background:var(--background-secondary,var(--background-primary,#1e1e1e));",
-		"  border-bottom:1px solid var(--background-modifier-border,rgba(128,128,128,.25));",
+		"  border:1px solid var(--background-modifier-border,rgba(128,128,128,.25));border-radius:6px;",
 		"  -webkit-app-region:no-drag;",
 		"}",
-		"." + BAR_ITEM_CLASS + "{",
-		"  appearance:none;border:0;background:transparent;color:inherit;font:inherit;",
-		"  display:flex;align-items:center;padding:0 9px;margin:2px 0;border-radius:4px;",
+		"#myobs-application-menu[hidden]{display:none !important;}",
+		"#myobs-application-menu::-webkit-scrollbar{display:none;}",
+		"#myobs-application-menu>button." + BAR_ITEM_CLASS + "{",
+		"  all:unset;appearance:none;box-sizing:border-box;border:0;background:transparent;color:inherit;font:inherit;",
+		"  display:flex;flex:0 0 auto;align-items:center;height:30px;min-height:0;min-width:0;",
+		"  padding:0 10px;margin:0;border-radius:4px;box-shadow:none;line-height:1.2;",
 		"  cursor:default;white-space:nowrap;",
 		"}",
-		"." + BAR_ITEM_CLASS + ":hover,." + BAR_ITEM_CLASS + ".is-open{",
+		"#myobs-application-menu>button." + BAR_ITEM_CLASS + ":hover,#myobs-application-menu>button." + BAR_ITEM_CLASS + ".is-open{",
 		"  background:var(--background-modifier-hover,rgba(128,128,128,.2));",
 		"  color:var(--text-normal,#ddd);",
 		"}",
-		"." + BAR_ITEM_CLASS + ":focus-visible{outline:2px solid var(--interactive-accent,#5b8def);outline-offset:-2px;}",
+		"#myobs-application-menu>button." + BAR_ITEM_CLASS + ":focus-visible{outline:2px solid var(--interactive-accent,#5b8def);outline-offset:-2px;}",
+		"button.myobs-menu-toggle.clickable-icon{all:unset;box-sizing:border-box;display:flex;flex:0 0 auto;align-items:center;justify-content:center;",
+		"  width:32px;height:32px;min-height:0;min-width:0;padding:0;margin:4px auto;border:0;border-radius:4px;box-shadow:none;",
+		"  background:transparent;color:var(--icon-color,var(--text-muted,#aaa));cursor:pointer;line-height:1;}",
+		"button.myobs-menu-toggle.clickable-icon:hover,button.myobs-menu-toggle.clickable-icon[aria-expanded=true]{background:var(--background-modifier-hover);color:var(--text-normal);}",
+		"button.myobs-menu-toggle.clickable-icon:focus-visible{outline:2px solid var(--interactive-accent,#5b8def);outline-offset:2px;}",
+		"button.myobs-menu-toggle.clickable-icon.is-floating{position:fixed;z-index:2147482990;top:48px;right:8px;margin:0;background:var(--background-secondary,#202020);}",
+		"button.myobs-menu-toggle.clickable-icon>svg{display:block;width:18px;height:18px;pointer-events:none;}",
+		"button.myobs-menu-toggle[hidden]{display:none !important;}",
 		"." + PANEL_CLASS + "{",
 		"  position:fixed;z-index:2147483000;box-sizing:border-box;",
 		"  min-width:200px;max-width:min(420px,92vw);max-height:min(80vh,640px);overflow-y:auto;",
@@ -316,12 +333,7 @@
 		".myobs-menu-arrow{flex:0 0 auto;color:var(--text-faint,#8a8a8a);}",
 		".myobs-menu-sep{height:1px;margin:5px 6px;background:var(--background-modifier-border,rgba(128,128,128,.28));}",
 		".myobs-menu-sep:first-child,.myobs-menu-sep:last-child{display:none;}",
-		// The bar takes real layout height; the app keeps the remaining space.
-		"body.myobs-menubar-active{display:flex;flex-direction:column;}",
-		"body.myobs-menubar-active>.app-container{flex:1 1 auto;height:auto;min-height:0;}",
-		"@media (max-width:720px){." + BAR_CLASS + "{display:none;}",
-		"  body.myobs-menubar-active{display:block;}",
-		"  body.myobs-menubar-active>.app-container{height:100%;}}"
+		"@media print{#myobs-application-menu,button.myobs-menu-toggle.clickable-icon{display:none !important;}}"
 	].join("\n");
 
 	function injectStyle(doc) {
@@ -640,8 +652,24 @@
 	 * menu is open, so it can stop the event before the workspace reacts.
 	 */
 	function onDocKey(event) {
-		if (!state.rootPanel && !state.popupPanel) return;
 		var key = event.key;
+		if (key === "Alt" && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+			if (!event.repeat) state.altPending = true;
+			return;
+		}
+		state.altPending = false;
+		if (key === "F10" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
+			event.preventDefault();
+			event.stopImmediatePropagation();
+			if (event.repeat) return;
+			if (state.barVisible) closeAll(true, "keyboard-toggle");
+			else showBar(true);
+			return;
+		}
+		if (!state.rootPanel && !state.popupPanel) {
+			if (state.barVisible) onBarKeyDown(event);
+			return;
+		}
 		var handled =
 			key === "Escape" ||
 			key === "Tab" ||
@@ -750,25 +778,117 @@
 		var doc = document;
 		if (!doc.body) return null;
 		injectStyle(doc);
-		// Obsidian owns the body class list; add one marker class and keep the
-		// flex layout scoped to it so popout documents are untouched.
-		if (!doc.body.classList.contains("myobs-menubar-active")) {
-			doc.body.classList.add("myobs-menubar-active");
-		}
 		var bar = doc.querySelector("." + BAR_CLASS);
 		if (!bar) {
 			bar = make(doc, "div", BAR_CLASS);
+			bar.id = "myobs-application-menu";
+			bar.hidden = true;
 			bar.setAttribute("role", "menubar");
+			bar.setAttribute("aria-label", "功能選單");
 			bar.setAttribute("data-myobs-menubar", "1");
-			bar.addEventListener("keydown", guard("bar keydown", onBarKeyDown));
-			// Insert before .app-container so the flex column places it first.
-			var container = doc.body.querySelector(":scope > .app-container");
-			if (container) doc.body.insertBefore(bar, container);
-			else doc.body.appendChild(bar);
+			doc.body.appendChild(bar);
 		}
 		state.barEl = bar;
 		state.barDoc = doc;
+		if (!state.toggleEl) {
+			var toggle = make(doc, "button", "clickable-icon myobs-menu-toggle");
+			toggle.type = "button";
+			toggle.setAttribute("aria-label", "功能選單");
+			toggle.title = "功能選單（F10 / Alt）";
+			toggle.setAttribute("aria-expanded", "false");
+			toggle.setAttribute("aria-controls", bar.id);
+			var svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
+			svg.setAttribute("viewBox", "0 0 24 24");
+			svg.setAttribute("fill", "none");
+			svg.setAttribute("stroke", "currentColor");
+			svg.setAttribute("stroke-width", "2");
+			svg.setAttribute("stroke-linecap", "round");
+			svg.setAttribute("aria-hidden", "true");
+			var lines = doc.createElementNS("http://www.w3.org/2000/svg", "path");
+			lines.setAttribute("d", "M4 6h16M4 12h16M4 18h16");
+			svg.appendChild(lines);
+			toggle.appendChild(svg);
+			toggle.addEventListener("mousedown", function () {
+				if (!state.barVisible) state.returnFocus = doc.activeElement;
+			});
+			toggle.addEventListener("click", guard("toggle", function (event) {
+				event.preventDefault();
+				if (state.barVisible) closeAll(true, "toggle");
+				else showBar(false);
+			}));
+			state.toggleEl = toggle;
+			mountToggle(50);
+		}
 		return bar;
+	}
+
+	function mountToggle(retries) {
+		if (!state.toggleEl || !document.body) return;
+		if (state.mountTimer) clearTimeout(state.mountTimer);
+		state.mountTimer = null;
+		var ribbon = document.querySelector(".workspace-ribbon.mod-primary, .side-dock-ribbon.mod-primary");
+		var actions = ribbon && ribbon.querySelector(".side-dock-actions");
+		if (!state.mountObserver && typeof MutationObserver === "function") {
+			state.mountObserver = new MutationObserver(guard("ribbon visibility", function () { mountToggle(0); }));
+		}
+		if (state.mountObserver) {
+			// Observe only the shell, not its note tree: ribbon visibility must
+			// preserve the entry point without reacting to every editor change.
+			var options = { childList: true, attributes: true, attributeFilter: ["class", "style"] };
+			state.mountObserver.observe(document.body, options);
+			var container = document.querySelector(".app-container");
+			if (container) state.mountObserver.observe(container, options);
+			if (ribbon) state.mountObserver.observe(ribbon, { childList: true, attributes: true, attributeFilter: ["class", "style"] });
+		}
+		var visible = actions && actions.getBoundingClientRect().width > 0;
+		if (visible) {
+			if (state.toggleEl.parentElement !== actions) actions.insertBefore(state.toggleEl, actions.firstChild);
+			state.toggleEl.classList.remove("is-floating");
+		} else {
+			if (state.toggleEl.parentElement !== document.body) document.body.appendChild(state.toggleEl);
+			state.toggleEl.classList.add("is-floating");
+			// The renderer sends its template before building the ribbon.
+			if (retries > 0) state.mountTimer = setTimeout(function () { mountToggle(retries - 1); }, 200);
+		}
+		if (state.barVisible) placeBar();
+	}
+
+	function placeBar() {
+		var bar = state.barEl;
+		if (!bar || bar.hidden) return;
+		var rect = state.toggleEl.getBoundingClientRect();
+		var width = document.documentElement.clientWidth;
+		var height = document.documentElement.clientHeight;
+		bar.style.maxWidth = Math.max(0, width - 12) + "px";
+		var beside = !state.toggleEl.classList.contains("is-floating") && rect.right + bar.offsetWidth + 12 <= width;
+		var left = beside ? rect.right + 6 : Math.min(rect.left, width - bar.offsetWidth - 6);
+		var top = beside ? rect.top : rect.bottom + 6;
+		if (top + bar.offsetHeight > height - 6) top = rect.top - bar.offsetHeight - 6;
+		bar.style.left = Math.max(6, left) + "px";
+		bar.style.top = Math.max(6, Math.min(top, height - bar.offsetHeight - 6)) + "px";
+	}
+
+	function showBar(focusFirstButton) {
+		if (!ensureBar() || !state.barButtons.length) return;
+		if (!state.barVisible && (!state.returnFocus || state.returnFocus === state.toggleEl)) {
+			state.returnFocus = document.activeElement;
+		}
+		mountToggle(0);
+		state.barVisible = true;
+		state.barEl.hidden = false;
+		state.toggleEl.setAttribute("aria-expanded", "true");
+		placeBar();
+		attachDismissHandlers(document);
+		if (focusFirstButton) focusBarButton(0);
+	}
+
+	function focusBarButton(index) {
+		if (!state.barButtons.length) return;
+		index = (index + state.barButtons.length) % state.barButtons.length;
+		state.focusTopIndex = index;
+		var button = state.barButtons[index];
+		button.scrollIntoView({ block: "nearest", inline: "nearest" });
+		focusRow(button);
 	}
 
 	function renderBar() {
@@ -778,6 +898,7 @@
 		while (bar.firstChild) bar.removeChild(bar.firstChild);
 		state.barButtons = [];
 		var items = barItems();
+		state.toggleEl.hidden = items.length === 0;
 		for (var i = 0; i < items.length; i++) {
 			(function (item, index) {
 				var button = make(doc, "button", BAR_ITEM_CLASS, displayLabel(item.label));
@@ -803,20 +924,25 @@
 
 	function onBarKeyDown(event) {
 		var key = event.key;
-		var handled = ["ArrowRight", "ArrowLeft", "ArrowDown", "Enter", " ", "Escape"].indexOf(key) !== -1;
-		if (handled) event.stopPropagation();
+		var handled = ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp", "Home", "End", "Enter", " ", "Escape", "Tab"].indexOf(key) !== -1;
+		if (!handled) return;
+		event.preventDefault();
+		event.stopImmediatePropagation();
 		var index = state.barButtons.indexOf(event.target);
+		if (index < 0) index = state.focusTopIndex || 0;
 		if (key === "ArrowRight" || key === "ArrowLeft") {
 			event.preventDefault();
 			if (!state.barButtons.length) return;
 			var delta = key === "ArrowRight" ? 1 : -1;
 			var next = (index + delta + state.barButtons.length) % state.barButtons.length;
-			focusRow(state.barButtons[next]);
+			focusBarButton(next);
 			if (state.openTopIndex >= 0) openTop(next, true);
-		} else if (key === "ArrowDown" || key === "Enter" || key === " ") {
+		} else if (key === "Home" || key === "End") {
+			focusBarButton(key === "Home" ? 0 : state.barButtons.length - 1);
+		} else if (key === "ArrowDown" || key === "ArrowUp" || key === "Enter" || key === " ") {
 			event.preventDefault();
 			openTop(index >= 0 ? index : 0, true);
-		} else if (key === "Escape") {
+		} else if (key === "Escape" || key === "Tab") {
 			event.preventDefault();
 			closeAll(true);
 		}
@@ -830,6 +956,7 @@
 		var item = items[index];
 		var button = state.barButtons[index];
 		if (!button) return;
+		if (!state.barVisible) showBar(false);
 		if (!item.submenu || !item.submenu.length) {
 			// A top-level item with no submenu behaves like a command.
 			closeAll();
@@ -844,7 +971,8 @@
 			if (focusFirstRow) focusFirst(state.rootPanel);
 			return;
 		}
-		closeAll();
+		closeAll(false, "switch-top", true);
+		focusBarButton(index);
 		var doc = button.ownerDocument;
 		var panel = buildPanel(doc, item.submenu, { root: true });
 		doc.body.appendChild(panel);
@@ -853,8 +981,10 @@
 		panel._myobsTopIndex = index;
 		state.rootPanel = panel;
 		state.openTopIndex = index;
+		state.focusTopIndex = index;
 		button.classList.add("is-open");
 		button.setAttribute("aria-expanded", "true");
+		attachDismissHandlers(doc);
 		// Obsidian calls preventDefault() on mousedown, so a click does not focus
 		// the button. Drive focus ourselves or every arrow key lands on <body>
 		// and the bar never sees a keydown.
@@ -879,7 +1009,9 @@
 	function popupAt(items, x, y, closeHook) {
 		var doc = activeDoc();
 		injectStyle(doc);
+		var returnFocus = doc.activeElement;
 		closeAll();
+		state.returnFocus = returnFocus;
 		var panel = buildPanel(doc, items, { root: true });
 		doc.body.appendChild(panel);
 		placePanel(doc, panel, x, y);
@@ -937,33 +1069,34 @@
 	function attachDismissHandlers(doc) {
 		removeDismissHandlers();
 		var win = docWindow(doc);
-		var onDown = function (event) {
+		var onDown = guard("outside click", function (event) {
 			var target = event.target;
 			if (!target) return;
+			if (state.toggleEl && state.toggleEl.contains(target)) return;
 			if (state.barEl && state.barEl.contains(target)) return;
 			var panels = doc.querySelectorAll("." + PANEL_CLASS);
 			for (var i = 0; i < panels.length; i++) {
 				if (panels[i].contains(target)) return;
 			}
 			closeAll(false, "outside-mousedown");
-		};
-		var onResize = function () {
+		});
+		var onResize = guard("resize", function () {
 			closeAll(false, "resize");
-		};
-		var onScroll = function (event) {
+		});
+		var onScroll = guard("scroll", function (event) {
 			var target = event.target;
-			if (target && target.closest && target.closest("." + PANEL_CLASS)) return;
+			if (target && target.closest && target.closest("." + PANEL_CLASS + ", ." + BAR_CLASS)) return;
 			closeAll(false, "scroll");
-		};
-		doc.addEventListener("mousedown", guard("outside click", onDown), true);
+		});
+		doc.addEventListener("mousedown", onDown, true);
 		// The main document gets its key handler at install() time so it runs
 		// before Obsidian's keymap. A popout document needs its own copy.
 		if (doc !== document && state.keyDocs.indexOf(doc) === -1) {
 			state.keyDocs.push(doc);
 			doc.addEventListener("keydown", guard("keydown", onDocKey), true);
 		}
-		win.addEventListener("resize", guard("resize", onResize), true);
-		doc.addEventListener("scroll", guard("scroll", onScroll), true);
+		win.addEventListener("resize", onResize, true);
+		doc.addEventListener("scroll", onScroll, true);
 		state.listeners = { doc: doc, win: win, onDown: onDown, onResize: onResize, onScroll: onScroll };
 	}
 
@@ -980,11 +1113,11 @@
 		state.listeners = null;
 	}
 
-	function closeAll(refocusBar, reason) {
-		if (state.rootPanel || state.popupPanel) {
+	function closeAll(refocusBar, reason, keepBar) {
+		if (state.rootPanel || state.popupPanel || state.barVisible) {
 			state.lastClose = { reason: reason || "explicit", at: Date.now() };
 		}
-		var topIndex = state.openTopIndex;
+		var returnFocus = state.returnFocus;
 		var popup = state.popupPanel;
 		var hook = state.popupClose;
 		state.popupClose = null;
@@ -995,6 +1128,12 @@
 		state.popupPanel = null;
 		removeDismissHandlers();
 		setTopClosed();
+		if (!keepBar) {
+			state.barVisible = false;
+			if (state.barEl) state.barEl.hidden = true;
+			if (state.toggleEl) state.toggleEl.setAttribute("aria-expanded", "false");
+			state.returnFocus = null;
+		}
 		if (hook) {
 			try {
 				hook();
@@ -1002,9 +1141,9 @@
 				warn("popup close hook threw", err);
 			}
 		}
-		if (refocusBar && state.barButtons.length && topIndex >= 0) {
-			var button = state.barButtons[topIndex];
-			if (button) focusRow(button);
+		if (refocusBar) {
+			if (returnFocus && returnFocus.isConnected && returnFocus !== document.body) focusRow(returnFocus);
+			else if (state.toggleEl) focusRow(state.toggleEl);
 		}
 	}
 
@@ -1165,6 +1304,22 @@
 	 */
 	function install() {
 		document.addEventListener("keydown", guard("keydown", onDocKey), true);
+		function cancelAltGesture() { state.altPending = false; }
+		document.addEventListener("pointerdown", cancelAltGesture, true);
+		document.addEventListener("mousedown", cancelAltGesture, true);
+		document.addEventListener("keyup", guard("alt keyup", function (event) {
+			if (event.key !== "Alt" || !state.altPending) return;
+			state.altPending = false;
+			event.preventDefault();
+			event.stopImmediatePropagation();
+			if (state.barVisible) closeAll(true, "alt-toggle");
+			else showBar(true);
+		}), true);
+		window.addEventListener("blur", function () {
+			state.altPending = false;
+			closeAll(false, "window-blur");
+		});
+		window.addEventListener("resize", guard("toggle placement", function () { mountToggle(0); }));
 		document.addEventListener(
 			"pointermove",
 			function (event) {
@@ -1197,6 +1352,9 @@
 		isOpen: function () {
 			return !!(state.rootPanel || state.popupPanel);
 		},
+		showBar: function () { showBar(true); },
+		hideBar: function () { closeAll(true); },
+		isBarVisible: function () { return state.barVisible; },
 		getActiveRow: function () {
 			var row = state.activeRow;
 			if (!row) return null;
@@ -1232,6 +1390,7 @@
 				top: state.openTopIndex,
 				rows: state.rows.length,
 				barItems: state.barButtons.length,
+				barVisible: state.barVisible,
 				template: state.template ? state.template.length : 0
 			};
 		}

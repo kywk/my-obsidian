@@ -13,6 +13,7 @@
  *   6. editorContextMenu  — editor right-click shows a menu with clipboard items
  *   7. noExceptions       — no unhandled exception, fatal or caught menu warning
  *   8. nested lifecycle   — nested action order, keyboard/sibling cleanup, hover cancellation
+ *   9. visibility/layout  — collapsed by default; overlay, keyboard/focus, resize, theme isolation
  *
  * Two menu implementations are exercised, and the report says which one ran:
  *
@@ -209,15 +210,17 @@ async function rightClickSelector(session, selector, options = {}) {
   return clickSelector(session, selector, { ...options, button: 'right' });
 }
 
+// CDP maps windowsVirtualKeyCode across platforms; a Windows value passed as
+// macOS nativeVirtualKeyCode can leave Chrome in a system keyboard gesture.
 async function pressKey(session, key, code, keyCode) {
   await cdp.send(
     'Input.dispatchKeyEvent',
-    { type: 'rawKeyDown', key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode },
+    { type: 'rawKeyDown', key, code, windowsVirtualKeyCode: keyCode },
     session,
   );
   await cdp.send(
     'Input.dispatchKeyEvent',
-    { type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode },
+    { type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode },
     session,
   );
 }
@@ -263,6 +266,165 @@ async function closeMenus(session) {
   await evaluate(session, 'window.__MYOBS_MENU && window.__MYOBS_MENU.close()').catch(() => {});
 }
 
+async function revealMenuBar(session) {
+  if (!await evaluate(session, '!document.querySelector(".myobs-menubar").hidden')) {
+    await clickSelector(session, '.myobs-menu-toggle');
+    await waitFor(session, '!document.querySelector(".myobs-menubar").hidden', 3000, 'menu bar to expand');
+  }
+}
+
+async function clickTopMenu(session, index) {
+  await revealMenuBar(session);
+  await evaluate(session, `document.querySelectorAll(".myobs-menubar-item")[${index}].scrollIntoView({ block: "nearest", inline: "nearest" })`);
+  await clickSelector(session, `.myobs-menubar-item[data-myobs-top="${index}"]`);
+}
+
+const LAYOUT_SNAPSHOT = `(() => {
+  const rect = el => { if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height, right: r.right, bottom: r.bottom }; };
+  const style = el => { if (!el) return null; const s = getComputedStyle(el); return { shadow: s.boxShadow, position: s.position, overflowX: s.overflowX, font: s.fontSize, padding: s.padding }; };
+  const bar = document.querySelector(".myobs-menubar");
+  const toggle = document.querySelector(".myobs-menu-toggle");
+  const ribbon = document.querySelector(".workspace-ribbon.mod-primary .side-dock-actions, .side-dock-ribbon.mod-primary .side-dock-actions");
+  return {
+    viewport: { width: innerWidth, height: innerHeight },
+    app: rect(document.querySelector(".app-container")), bar: rect(bar), toggle: rect(toggle), ribbon: rect(ribbon), toggleInRibbon: !!ribbon?.contains(toggle),
+    hidden: bar?.hidden, expanded: toggle?.getAttribute("aria-expanded"),
+    toggleStyle: style(toggle), barStyle: style(bar),
+    barClientWidth: bar?.clientWidth, barScrollWidth: bar?.scrollWidth, barScrollLeft: bar?.scrollLeft,
+    lastButtonReachable: (() => { const b = bar?.querySelector("button:last-child"); if (!b || bar.hidden) return null; const r = b.getBoundingClientRect(); return b.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)); })(),
+    buttons: [...document.querySelectorAll(".myobs-menubar-item")].map(el => ({ ...rect(el), ...style(el) })),
+    panels: [...document.querySelectorAll(".myobs-menu-panel")].map(rect),
+  };
+})()`;
+
+function fullApp(snapshot) {
+  return snapshot.app && Math.abs(snapshot.app.y) <= 1 && Math.abs(snapshot.app.height - snapshot.viewport.height) <= 1;
+}
+
+function withinViewport(rect, viewport) {
+  return rect && rect.width > 0 && rect.height > 0 && rect.x >= -1 && rect.y >= -1 && rect.right <= viewport.width + 1 && rect.bottom <= viewport.height + 1;
+}
+
+async function menuVisibilityChecks() {
+  const originalViewport = await evaluate(mainSession, '({ width: innerWidth, height: innerHeight })');
+  const restoreViewport = async () => {
+    await cdp.send('Emulation.setDeviceMetricsOverride', { ...originalViewport, deviceScaleFactor: 1, mobile: false }, mainSession);
+    await waitFor(mainSession, `innerWidth === ${originalViewport.width} && innerHeight === ${originalViewport.height}`, 5000, 'original viewport to return');
+    await sleep(250);
+  };
+  await waitFor(mainSession, 'window.__MYOBS_MENU && __MYOBS_MENU.installed && __MYOBS_MENU.getBarLabels().length >= 4', 20000, 'menu template before visibility checks');
+  await check('menuCollapsedLayout', async () => {
+    const initial = await evaluate(mainSession, LAYOUT_SNAPSHOT);
+    fact('menuCollapsedLayout', initial);
+    if (!initial.hidden || initial.expanded !== 'false') throw new Error('menu should start collapsed with aria-expanded=false');
+    if (!fullApp(initial)) throw new Error('collapsed menu still reserves the first row');
+    if (!withinViewport(initial.toggle, initial.viewport) || initial.toggle.height > 44) throw new Error('menu toggle is missing, oversized, or off screen');
+    if (initial.ribbon?.width > 1 && initial.ribbon?.height > 1 && !initial.toggleInRibbon) throw new Error('visible ribbon does not contain the menu toggle');
+    if (initial.toggleStyle.shadow !== 'none') throw new Error('global button shadow leaked into the menu toggle');
+    return true;
+  }, 'collapsed menu gives the complete viewport height to the editor');
+
+  await check('menuOverlayResponsive', async () => {
+    const samples = [];
+    try {
+      // Vendor and theme CSS style every button. Host menu controls must reset
+      // those defaults even when the stylesheet arrives after menu.js.
+      await evaluate(mainSession, `(() => { const s = document.createElement("style"); s.id = "myobs-menu-theme-fixture"; s.textContent = "button{height:64px;min-height:48px;padding:18px 24px;box-shadow:0 0 14px 4px red;font-size:24px;border:6px solid red;}"; document.head.appendChild(s); })()`);
+      for (const width of [1280, 820, 480]) {
+        await closeMenus(mainSession);
+        await cdp.send('Emulation.setDeviceMetricsOverride', { width, height: 800, deviceScaleFactor: 1, mobile: false }, mainSession);
+        await sleep(250);
+        await revealMenuBar(mainSession);
+        const sample = await evaluate(mainSession, LAYOUT_SNAPSHOT);
+        samples.push(sample);
+        if (!fullApp(sample)) throw new Error(`menu expansion moved the editor at ${width}px`);
+        if (sample.hidden || sample.expanded !== 'true') throw new Error(`menu did not expand at ${width}px`);
+        if (!withinViewport(sample.bar, sample.viewport) || sample.bar.height > 44) throw new Error(`menu bar escapes the viewport or wraps at ${width}px`);
+        if (!withinViewport(sample.toggle, sample.viewport) || sample.toggle.height > 44 || sample.toggleStyle.shadow !== 'none') throw new Error(`global button style leaked into the toggle at ${width}px`);
+        if (!sample.buttons.length || sample.buttons.some(b => b.height <= 0 || b.height > 40 || b.shadow !== 'none' || b.y < sample.bar.y - 1 || b.bottom > sample.bar.bottom + 1)) throw new Error(`menu button style overflows its bar at ${width}px`);
+        const first = sample.buttons[0];
+        const last = sample.buttons.at(-1);
+        if ((first.x < sample.bar.x - 1 || last.right > sample.bar.right + 1) && !['auto', 'scroll'].includes(sample.barStyle.overflowX)) throw new Error(`overflowing menu items cannot scroll at ${width}px`);
+        await evaluate(mainSession, 'document.querySelector(".myobs-menubar-item:last-child").scrollIntoView({ block: "nearest", inline: "nearest" })');
+        const end = await evaluate(mainSession, LAYOUT_SNAPSHOT);
+        if (!withinViewport(end.buttons.at(-1), end.viewport) || !end.lastButtonReachable) throw new Error(`last menu item is off screen or covered at ${width}px`);
+      }
+      return true;
+    } finally {
+      fact('menuOverlayResponsive', samples);
+      await evaluate(mainSession, 'document.getElementById("myobs-menu-theme-fixture")?.remove()');
+      await closeMenus(mainSession);
+      await restoreViewport();
+    }
+  }, 'overlay keeps full editor height, contains button styles, and remains usable at 1280/820/480px');
+
+  await check('menuKeyboardDismissal', async () => {
+    const samples = [];
+    try {
+      for (const entry of [{ key: 'F10', code: 'F10', keyCode: 121 }, { key: 'Alt', code: 'AltLeft', keyCode: 18 }]) {
+        await closeMenus(mainSession);
+        const focus = await evaluate(mainSession, `(() => { const editor = app.workspace.activeLeaf?.view?.editor; if (editor?.focus) editor.focus(); else document.querySelector(".cm-content")?.focus(); window.__myobsMenuPriorFocus = document.activeElement; return { tag: document.activeElement?.tagName, cls: document.activeElement?.className, editor: !!document.activeElement?.closest(".cm-editor") }; })()`);
+        if (!focus.editor) throw new Error('could not focus the editor for keyboard restoration');
+        await pressKey(mainSession, entry.key, entry.code, entry.keyCode);
+        await sleep(150);
+        const opened = await evaluate(mainSession, `({ visible: !document.querySelector(".myobs-menubar").hidden, firstActive: document.activeElement === document.querySelector(".myobs-menubar-item"), expanded: document.querySelector(".myobs-menu-toggle").getAttribute("aria-expanded") })`);
+        await pressKey(mainSession, 'Escape', 'Escape', 27);
+        await sleep(150);
+        const closed = await evaluate(mainSession, `({ hidden: document.querySelector(".myobs-menubar").hidden, restored: document.activeElement === window.__myobsMenuPriorFocus, open: __MYOBS_MENU.isOpen() })`);
+        samples.push({ key: entry.key, focus, opened, closed });
+        if (!opened.visible || !opened.firstActive || opened.expanded !== 'true') throw new Error(`${entry.key} did not expose and focus the menu`);
+        if (!closed.hidden || !closed.restored || closed.open) throw new Error(`${entry.key}/Escape did not collapse the menu and restore editor focus`);
+      }
+      // This verifies our pending-Alt cancellation only. Native Alt+click can
+      // enter Chrome's window gesture and stall later CDP resize/input events.
+      await evaluate(mainSession, `(() => {
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Alt", code: "AltLeft", altKey: true, bubbles: true, cancelable: true }));
+        document.querySelector(".app-container").dispatchEvent(new MouseEvent("mousedown", { altKey: true, bubbles: true, cancelable: true, button: 0 }));
+        document.dispatchEvent(new KeyboardEvent("keyup", { key: "Alt", code: "AltLeft", bubbles: true, cancelable: true }));
+      })()`);
+      await sleep(100);
+      const altClick = await evaluate(mainSession, 'document.querySelector(".myobs-menubar").hidden');
+      fact('menuAltClickLeavesCollapsed', altClick);
+      if (!altClick) throw new Error('Alt+click was mistaken for a bare Alt menu gesture');
+      await revealMenuBar(mainSession);
+      await clickAt(cdp, mainSession, { x: 700, y: 650 });
+      const outside = await evaluate(mainSession, 'document.querySelector(".myobs-menubar").hidden && !__MYOBS_MENU.isOpen()');
+      fact('menuOutsideDismissal', outside);
+      if (!outside) throw new Error('clicking outside the toolbar did not collapse it');
+      return true;
+    } finally {
+      fact('menuKeyboardDismissal', samples);
+      await evaluate(mainSession, 'delete window.__myobsMenuPriorFocus');
+      await closeMenus(mainSession);
+    }
+  }, 'F10/Alt expose the menu; Escape restores editor focus and outside clicks collapse it');
+
+  await check('menuResizeDismissal', async () => {
+    try {
+      await revealMenuBar(mainSession);
+      const index = await evaluate(mainSession, 'document.querySelectorAll(".myobs-menubar-item").length - 1');
+      await clickTopMenu(mainSession, index);
+      const before = await evaluate(mainSession, LAYOUT_SNAPSHOT);
+      fact('menuBeforeResize', before);
+      if (!before.panels.length) throw new Error('last menu item did not open a panel');
+      if (before.panels.some(panel => !withinViewport(panel, before.viewport))) throw new Error('menu panel escaped the viewport before resize');
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 480, height: 640, deviceScaleFactor: 1, mobile: false }, mainSession);
+      await waitFor(mainSession, 'document.querySelector(".myobs-menubar").hidden && !document.querySelector(".myobs-menu-panel")', 5000, 'resize event to dismiss the menu');
+      const after = await evaluate(mainSession, LAYOUT_SNAPSHOT);
+      fact('menuAfterResize', after);
+      if (!after.hidden || after.panels.length || !fullApp(after)) throw new Error('resizing left a stale menu panel or reserved layout row');
+      await clickTopMenu(mainSession, index);
+      const reopened = await evaluate(mainSession, LAYOUT_SNAPSHOT);
+      fact('menuReopenedNarrow', reopened);
+      if (!reopened.panels.length || reopened.panels.some(panel => !withinViewport(panel, reopened.viewport))) throw new Error('reopened narrow menu panel escapes the viewport');
+      return true;
+    } finally {
+      await closeMenus(mainSession);
+      await restoreViewport();
+    }
+  }, 'resize dismisses stale panels and narrow menus reopen inside the viewport');
+}
+
 // ---------------------------------------------------------------- checks
 
 let cdp;
@@ -291,7 +453,7 @@ function attachConsole(session) {
   });
 }
 
-async function dismissTrustModal(session) {
+async function assertNoTrustModal(session) {
   const state = await evaluate(
     session,
     `(async () => {
@@ -301,22 +463,13 @@ async function dismissTrustModal(session) {
           app.workspace.onLayoutReady(resolve);
         });
       }
-      const had = !!document.querySelector(".modal-bg");
-      if (had) {
-        // Trust is recorded in origin localStorage, which a fresh Chrome
-        // profile never has, so the prompt reappears on every run.
-        try { await app.plugins.setEnable(true); } catch (err) {}
-        try { app.setting.close(); } catch (err) {}
-        document.querySelectorAll(".modal-bg, .modal-container, .modal").forEach((el) => {
-          if (typeof el.detach === "function") el.detach();
-          else el.remove();
-        });
-        await new Promise((r) => setTimeout(r, 400));
-      }
-      return JSON.stringify({ had, remains: !!document.querySelector(".modal-bg") });
+      const had = [...document.querySelectorAll(".modal-container")].some(el => /do you trust the author of this vault|trust author and enable plugins|信任.{0,10}作者/i.test(el.textContent || ""));
+      return JSON.stringify({ had, remains: had });
     })()`,
   );
-  return JSON.parse(state);
+  const result = JSON.parse(state);
+  if (result.remains) throw new Error('vault trust prompt remained visible despite automatic trust');
+  return result;
 }
 
 async function openNote(session) {
@@ -477,20 +630,22 @@ async function main() {
   }
   fact('bootMs', Date.now() - started);
 
-  const modal = await dismissTrustModal(mainSession);
+  const modal = await assertNoTrustModal(mainSession);
   fact('trustModal', modal);
   log('trust modal', modal);
 
   fact('note', await openNote(mainSession));
   await sleep(600);
-  // The trust prompt is raised once plugins finish loading, which can be after
-  // layout-ready; a second pass keeps the tab and editor clicks unobstructed.
-  const modal2 = await dismissTrustModal(mainSession);
+  // A late trust prompt must fail acceptance instead of being dismissed by
+  // the harness and hiding a boot regression.
+  const modal2 = await assertNoTrustModal(mainSession);
   if (modal2.had) fact('trustModalAfterOpen', modal2);
 
   report.nativeMenus = await evaluate(mainSession, 'app.vault.getConfig("nativeMenus")');
   report.menuPath = report.nativeMenus === false ? 'renderer-html' : 'html-fallback';
   fact('platformIsMac', await evaluate(mainSession, 'process.platform === "darwin"'));
+
+  await menuVisibilityChecks();
 
   // ---- 1. menu bar -------------------------------------------------------
   await check(
@@ -503,16 +658,11 @@ async function main() {
         'application menu bar',
       );
       fact('barLabels', labels);
-      const barRect = await rectOf(mainSession, '.myobs-menubar');
-      const appTop = await evaluate(
-        mainSession,
-        'document.querySelector(".app-container").getBoundingClientRect().top',
-      );
-      const barBottom = barRect.y + barRect.h / 2;
-      fact('barHeight', barRect.h);
-      fact('appContainerTop', appTop);
-      fact('barBottom', barBottom);
-      if (appTop < barBottom - 1) throw new Error('menu bar overlaps app content');
+      await revealMenuBar(mainSession);
+      const layout = await evaluate(mainSession, LAYOUT_SNAPSHOT);
+      fact('barOverlay', layout);
+      if (!fullApp(layout) || !withinViewport(layout.bar, layout.viewport)) throw new Error('menu bar does not overlay the full-height editor');
+      await closeMenus(mainSession);
       return labels.length >= 4;
     },
     'bar rendered from set-menu',
@@ -579,18 +729,7 @@ async function main() {
     'submenu',
     async () => {
       if (viewIndex < 0) throw new Error('no View top-level item in the bar');
-      const buttons = await evaluate(
-        mainSession,
-        `(() => {
-          const b = document.querySelectorAll(".myobs-menubar-item")[${viewIndex}];
-          if (!b) return null;
-          const r = b.getBoundingClientRect();
-          return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
-        })()`,
-      );
-      if (!buttons) throw new Error('View button not found');
-      const p = JSON.parse(buttons);
-      await clickAt(cdp, mainSession, p);
+      await clickTopMenu(mainSession, viewIndex);
       await sleep(350);
       const snapshot = await openMenuSnapshot(mainSession);
       fact('viewMenu', snapshot);
@@ -627,20 +766,7 @@ async function main() {
       fact('ribbonModel', model);
       if (!model) throw new Error('app:toggle-ribbon is not in the set-menu template');
       if (typeof model.checked !== 'boolean') throw new Error('app:toggle-ribbon has no checked state (update-menu-items never arrived)');
-      await clickAt(
-        cdp,
-        mainSession,
-        JSON.parse(
-          await evaluate(
-            mainSession,
-            `(() => {
-              const b = document.querySelectorAll(".myobs-menubar-item")[${viewIndex}];
-              const r = b.getBoundingClientRect();
-              return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
-            })()`,
-          ),
-        ),
-      );
+      await clickTopMenu(mainSession, viewIndex);
       await sleep(300);
       const snapshot = await openMenuSnapshot(mainSession);
       const label = await evaluate(
@@ -678,20 +804,7 @@ async function main() {
     async () => {
       const before = await evaluate(mainSession, 'document.body.classList.contains("show-ribbon")');
       const model = await modelItem(mainSession, 'app:toggle-ribbon');
-      await clickAt(
-        cdp,
-        mainSession,
-        JSON.parse(
-          await evaluate(
-            mainSession,
-            `(() => {
-              const b = document.querySelectorAll(".myobs-menubar-item")[${viewIndex}];
-              const r = b.getBoundingClientRect();
-              return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
-            })()`,
-          ),
-        ),
-      );
+      await clickTopMenu(mainSession, viewIndex);
       await sleep(300);
       const target = await evaluate(
         mainSession,
@@ -714,8 +827,14 @@ async function main() {
         'ribbon state to flip',
       ).catch(() => false);
       const after = await evaluate(mainSession, 'document.body.classList.contains("show-ribbon")');
-      fact('ribbonToggle', { before, after });
+      const collapsed = await evaluate(mainSession, 'document.querySelector(".myobs-menubar").hidden');
+      fact('ribbonToggle', { before, after, collapsed });
+      if (!collapsed) throw new Error('menu command did not collapse the toolbar');
       if (!flipped) throw new Error(`app:toggle-ribbon did not run (show-ribbon stayed ${before})`);
+      await waitFor(mainSession, '(() => { const r = document.querySelector(".myobs-menu-toggle").getBoundingClientRect(); return r.width > 0 && r.height > 0; })()', 3000, 'menu entry point after changing ribbon visibility');
+      const entry = await evaluate(mainSession, LAYOUT_SNAPSHOT);
+      fact('menuEntryAfterRibbonToggle', entry);
+      if (!withinViewport(entry.toggle, entry.viewport)) throw new Error('changing ribbon visibility hid the menu entry point');
 
       // update-menu-items must follow the command; the panel was closed by the
       // click, so reopen and compare again.
