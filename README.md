@@ -6,7 +6,7 @@
 外面的 Electron／Node 依賴由 13 個 shim 取代。不是重寫的編輯器，也不是遠端桌面串流。
 
 ```
-Obsidian 1.14.4 · Node 22 · 328 個單元測試 · 20 支端到端 harness（229 項斷言）
+Obsidian 1.14.4 · Node 22 · 334 個單元測試 · 21 支端到端 harness（239 項斷言）
 ```
 
 > **Agent 入口**：`AGENTS.md`（硬規則與文件路由）→ `docs/HANDOFF.md`（接手驗證）→
@@ -154,9 +154,9 @@ npm run dev -- --vault ~/my-vault
 
 - Markdown 編輯與預覽、檔案樹、分頁與分割、全域搜尋、標籤／反向連結、圖譜、Canvas、命令面板
 - 核心外掛全數、主題與 CSS 片段
-- **社群外掛**：載入、啟用、安裝、更新、卸載（含 Obsidian 自己的 Browse 介面）
+- **社群外掛**：載入、啟用、安裝、更新、卸載（含 Obsidian 自己的 Browse 介面）；每次啟動直接信任目前 vault，保留個別外掛的停用狀態
 - **多視窗 popout**（同一份 app 的第二個 DOM 表面，不是第二個實例）
-- **選單列、右鍵選單、列印／Export to PDF**
+- **收合功能選單、右鍵選單、列印／Export to PDF**：選單平常不占頂部空間；左側工具列的三橫線按鈕、F10 或單按 Alt 可展開，Escape／點外部收起
 - **外部變更熱重載**、**衝突副本提示**、**斷線偵測與重連補償**
 - 桌面與平板優先的版面（>=600px 維持 Obsidian 桌面／平板版面；<600px 才是手機 fallback）、PWA 可加到主畫面
 
@@ -231,7 +231,7 @@ packages/server/     Fastify + WS：/api/fs、/v/*、/api/watch、/api/proxy、/
 packages/shim/       13 個 classic script：取代 Electron／Node 依賴（含 Buffer 等全域）
 packages/runtime/    7 個在 app.js 之前載入的模組：
                      platform-bridge、plugin-watch、popout、menu、print、notices、resilience
-tools/               20 支零依賴 CDP harness（驅動本機 Chrome，不需要 Playwright）
+tools/               21 支零依賴 CDP harness（驅動本機 Chrome，不需要 Playwright）
 scripts/             fetch-obsidian.mjs（零依賴 ASAR 解包）、start.mjs（啟動器 + doctor）
 docs/                DESIGN.md（決策與證據）、CONTRACTS.md（線路契約）、
                      HANDOFF.md（接手驗證）、TODO.md（現況與待決策）
@@ -244,13 +244,13 @@ vendor/obsidian/     gitignore；由 scripts/fetch-obsidian.mjs 產生
 
 ```bash
 npm --prefix packages/server ci # 第一次或 package-lock 變更後
-npm test                        # 單元測試（328 項）
+npm test                        # 單元測試（334 項）
 
 npm run check:spike           # boot / 無 installer 更新對話框 / 完整載入（與磁碟可見檔案數相符）/ metadata cache / 文字與二進位往返 / 冷啟 / 良性錯誤不蓋畫面
 npm run check:hotreload       # WS、筆記外部變更、plugin 熱重載、回音過濾
 npm run check:attachment      # /v/*、Range、位元組一致、編碼檔名
 npm run check:popout          # 多視窗、同一 app 物件、獨立寫入
-npm run check:menu            # 選單列、右鍵選單、Move to new window
+npm run check:menu            # 收合浮層、主題隔離、鍵盤／焦點、右鍵選單、Move to new window
 npm run check:print           # 列印、PWA、寬度切換
 npm run check:dialog          # remote.dialog、Export to PDF 全鏈路
 npm run check:notices         # 通知層、conflict 單卡、外掛失敗
@@ -266,6 +266,7 @@ npm run check:dataview        # DQL／JS、原生查詢區塊、索引更新、c
 npm run check:tasks           # 完成／取消、日期、每日重複任務、重載
 npm run check:quickadd        # Template／Capture Unicode 寫檔、保留內容、重載
 npm run check:origin-echo     # 同檔外改、跨批次回音、外掛重載後寫入收斂
+npm run check:plugin-trust    # 全新 origin 直接載入外掛、不出現信任彈窗、保留個別停用
 npm run audit:plugins         # 既有啟用外掛的逐項初始化盤點（須 --vault <copy>）
 ```
 
@@ -285,7 +286,7 @@ rsync -a --exclude='.git/' --exclude='.docusaurus/' --exclude='node_modules/' \
 
 # 每支 harness 一份乾淨複本：attachment 會留 fixture、menu/popout 會改
 # workspace-server.json，共用同一份會讓後面的 harness 繼承前一支的狀態。
-for name in spike hotreload attachment popout menu print dialog notices resilience parity plugin-install plugin-support templater geo-story-map vault-feed-reader kanban dataview tasks quickadd origin-echo; do
+for name in spike hotreload attachment popout menu print dialog notices resilience parity plugin-install plugin-support templater geo-story-map vault-feed-reader kanban dataview tasks quickadd origin-echo plugin-trust; do
   DEST=$(mktemp -d)
   rsync -a "$BASE/" "$DEST/"
   npm run "check:$name" -- --vault "$DEST"

@@ -189,3 +189,12 @@
 | `electron-shim.js`（`webContents.zoomLevel`） | 由固定的 `0` 改為 getter/setter，反映 `webFrame` 的 CSS zoom 近似值。 | Electron 的 `zoomLevel` 會影響 devicePixelRatio 與 popout 還原；CSS zoom 不完全等價（§2 `webFrame` 列）。 |
 | `popout.js`（子視窗寫入） | popout realm 的 `fs` shim 走同一組 `/api/fs`（有自己的 token）；`app.vault.modify()` 之類的呼叫其實是主 realm 的 adapter，因此寫入路徑與主視窗完全相同。 | 桌機完全相同（同一 process 共用 adapter）。 |
 
+## 10. 宿主信任與選單入口
+
+- `boot-data.js` 在官方 renderer 前信任目前 vault，每次覆寫 `enable-plugin-<vaultId>` 為 true。
+  這是本宿主的產品預設；不改 community-plugins 清單、policy 或程序執行拒絕。
+  localStorage 被網站權限拒絕時無法保存官方決定，會記一般警告，需允許網站儲存。
+- 功能選單預設收起且不占首列；入口依原生 primary ribbon 存在／可見狀態掛載或浮動。
+  使用官方 1.14.4 的 ribbon class 與 DOM 結構；改版時需重驗掛載與 fallback。
+  明確重設控制項的尺寸與字型，隔離一般全域 button 樣式；不保證任意使用者 `!important` 規則。
+  主視窗提供應用選單入口，popout 維持原有右鍵／popup 功能。

@@ -18,7 +18,7 @@
 
 1. **`README.md`** —— 這個專案是什麼、怎麼跑、能做與不能做什麼、疑難排解。
 2. **`AGENTS.md`** —— 7 條硬規則、文件路由與驗證門檻。這是護欄，違反它的改動一律不接受。
-3. **`docs/DESIGN.md` §11** —— **30 個陷阱**。這是全 repo 最省時間的一份：
+3. **`docs/DESIGN.md` §11** —— **32 個陷阱**。這是全 repo 最省時間的一份：
    每一個都是花了好幾小時、用 shipped artifact 或實測挖出來的，
    不知道就會重踩（例如「附件 URL 全部 404 的真正原因」、「`listAll()` 會弄壞檔案樹」）。
 4. **`docs/TODO.md`** —— 現況表（哪個能力由哪支 harness 驗收）、需要決策的 4 件事、
@@ -33,24 +33,26 @@ shim 的已知落差查 **`packages/shim/GAPS.md`**。 外掛工作另讀 **`doc
 
 ```bash
 npm --prefix packages/server ci
-npm test                                  # 328/328
+npm test                                  # 334/334
 export MYOBS_LIVE_VAULT=/path/to/real-vault
 npm run check:spike -- --vault <copy>     # 10/10
 npm run dev -- --vault <copy>             # 另開終端；app 能 boot、沒有 fatal
 ```
 
-四項都成立才算拿到可用基準；完整 20 支見下一節。**不要先改 code 再回頭補驗證。**
+四項都成立才算拿到可用基準；完整 21 支見下一節。**不要先改 code 再回頭補驗證。**
 
 ---
 
-## 現況（2026-10-24 外掛支援與同檔外部更新）
+## 現況（2026-10-24 自動信任與收合選單）
 
-- 程式與驗收基準：`31891ec`；本輪自 `cb5d50e` 起分組提交，最新版本以 `git log -1` 為準
+- 程式與驗收基準：`e11953a`；本輪自 `d533185` 起分組提交自動信任與收合選單，最新版本以 `git log -1` 為準
 - 程式、測試與驗收工具已納入版控；檔案清單以 `git ls-files` 為準，後續變更查 `git status --short`
 - Node 22；server 與 shim 都是 **plain JavaScript，沒有 build step**
-- 328 個單元測試 + **20 支零依賴 CDP harness**（229 項斷言；`check:spike` 10 項）
+- 334 個單元測試 + **21 支零依賴 CDP harness**（239 項斷言；`check:spike` 10 項）
 - renderer 是**未修改**的官方 Obsidian 1.14.4（`app.js` 3,942,126 bytes），
   由 `npm run vendor` 在操作者機器上解包，`vendor/` 不進版控
+- 每次 boot 自動信任目前 vault；不改個別外掛啟用清單；`check:plugin-trust` 6 項驗全新 origin 與既有 false 設定
+- 功能選單預設收起、不占首列；左側工具列入口或 F10／單按 Alt 展開浮層，窄視窗仍可操作
 - originToken 已綁定成功寫入版本；同檔外改不再被 30 秒 TTL 略過，跨批次回音仍能過濾（DESIGN §11.30）
 - Kanban 移卡的宿主子選單遞迴已修；四個外掛功能驗收見 `PLUGINS.md`
 - 三個原本失敗的外掛已初始化成功；Feed Reader 的缺訂閱檔冷啟限制與 Apply 恢復方式見 `PLUGINS.md`
@@ -85,11 +87,11 @@ BASE=/tmp/vault-copy && mkdir -p "$BASE"
 rsync -a --exclude='.git/' --exclude='.docusaurus/' --exclude='node_modules/' \
   "$MYOBS_LIVE_VAULT/" "$BASE/"
 
-npm test                                  # 328/328
+npm test                                  # 334/334
 
 # 每支 harness 一份乾淨複本。attachment 會留 fixture；menu/popout 會改
 # workspace-server.json。共用一份會讓後面的 harness 繼承前一棒的狀態。
-for name in spike hotreload attachment popout menu print dialog notices resilience parity plugin-install plugin-support templater geo-story-map vault-feed-reader kanban dataview tasks quickadd origin-echo; do
+for name in spike hotreload attachment popout menu print dialog notices resilience parity plugin-install plugin-support templater geo-story-map vault-feed-reader kanban dataview tasks quickadd origin-echo plugin-trust; do
   DEST=$(mktemp -d)
   rsync -a "$BASE/" "$DEST/"
   npm run "check:$name" -- --vault "$DEST"
@@ -105,7 +107,7 @@ done
 Templater 12 項、Geo Story Map 12 項、Vault Feed Reader 13 項。複本必須已安裝
 2.26.0／0.5.1／0.6.1 的對應原始外掛；未安裝或版本不符會明確拒絕。
 另有 Kanban 2.0.51／14 項、Dataview 0.5.68／17 項、Tasks 8.6.0／12 項、
-QuickAdd 2.32.1／14 項；`check:menu` 現為 11 項，包含子選單關閉回歸。
+QuickAdd 2.32.1／14 項；`check:menu` 現為 15 項，包含子選單、收合空間、三寬度、主題隔離、鍵盤／焦點與入口可達性。
 `check:origin-echo` 13 項驗同檔外改、重載後存檔與跨批次回音收斂。
 `audit:plugins` 另行產生逐外掛盤點，不算 harness。
 其中檔案數是與「磁碟可見檔案數」對照，不要求 vault 大於 5,000 檔。

@@ -109,6 +109,14 @@ Dataview 正式驗收已改成 checkbox 寫 Alpha 後，十秒內外改 Alpha，
 兩次外部 data 更新與一次 main 更新後，預期 loads 4／unloads 3／onload writes 4，
 觀察窗口內不得繼續增加。多分頁同時持續互寫仍不屬於協作支援。
 
+## 啟動時的信任決定
+
+目前宿主每次 boot 都直接信任目前 vault，省略官方首次信任彈窗；
+已停用的個別外掛維持停用，實際載入仍受啟用清單與 server policy 控制。
+`check:plugin-trust` 6 項用全新 origin 驗首次載入、既有 false 決定被更新、
+信任 modal 從未出現，以及停用外掛／清單保持不變。
+瀏覽器若拒絕 localStorage，需允許網站儲存後重新載入。
+
 ## 重跑流程
 
 每次以新的 vault 複本執行，`MYOBS_LIVE_VAULT` 必須指向真實 vault。
@@ -116,6 +124,7 @@ Dataview 正式驗收已改成 checkbox 寫 Alpha 後，十秒內外改 Alpha，
 
 ```bash
 npm test
+npm run check:plugin-trust -- --vault <trust-copy> --json /tmp/plugin-trust.json
 npm run check:origin-echo -- --vault <origin-copy> --json /tmp/origin-echo.json
 npm run check:plugin-support -- --vault <copy> --json /tmp/plugin-support.json
 npm run check:templater -- --vault <templater-copy> --json /tmp/templater.json
@@ -137,8 +146,8 @@ npm run audit:plugins -- --vault <another-copy> --json /tmp/plugin-audit.json
 
 ## 後續支援工作
 
-本輪整合驗證：328/328 單元測試、20 支 harness／229 項斷言全數通過，包含真實網路安裝；
-doctor 與 dev mode 的實際瀏覽器啟動通過。71 個 JavaScript 檔案語法檢查通過，
+本輪整合驗證：334/334 單元測試、21 支 harness／239 項斷言全數通過，包含真實網路安裝；
+doctor 與 dev mode 的實際瀏覽器啟動通過。73 個 JavaScript 檔案語法檢查通過，
 vendor manifest 記錄的四個資產雜湊一致，版本庫內沒有授權聲明文字。
 所有寫入驗證均在獨立 vault 複本進行；本機原生 watcher 額度不足，以 polling 驗收。
 

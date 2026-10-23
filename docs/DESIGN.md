@@ -823,3 +823,31 @@ resolver→lstat、lstat→open 與開啟外部檔後還原祖先的 ABA 情境�
 更新、重新登記 token 後再外改，以及重載／寫入次數停止增加。單元測試另涵蓋
 等長內容並還原 mtime、無 token 與失敗請求、寫入競態；不同分頁事件由 shim 測試驗收。
 兩個 renderer 持續互寫同檔仍屬多寫入者問題，不能把單一 writer 的回音收斂宣稱為協作支援。
+
+
+### 11.31 vault 信任決定須在外掛初始化前提供
+
+官方 PluginManager 在 initialize 時讀 `enable-plugin-<appId>`；null 顯示首次信任彈窗，
+false 留在限制模式。等 app 建立後才設定會錯過首輪載入，刪掉 modal 也不代表外掛已載入。
+本宿主的 vault IPC 以 boot.vaultId 建 appId，因此由 boot-data 在 app.js 前設定目前 key=true。
+這是使用者要求的預設，每次 boot 覆寫 false；個別停用清單、policy 與程序拒絕仍保留。
+`check:plugin-trust` 在全新 origin 監看 modal，驗首次 onload、false 後重載與停用外掛不載入。
+
+### 11.32 宿主功能選單不能沿用全域 button 尺寸或占滿首列
+
+舊 toolbar 高 28px，按鈕卻高 30px；一般主題還會加入 font／padding／shadow，讓它膨脹。
+只限制父列高度不能隔離 button 樣式；改為限定宿主 selector 並重設控制項尺寸，
+同時用 hidden＋fixed 浮層讓 app-container 保持完整視窗，不再覆寫 body 的 flex 排版。
+窄寬度若只 display:none 會讓功能入口消失；保留 primary ribbon 按鈕與浮動 fallback。
+官方實際使用 mod-primary／mod-secondary，不能假設 mod-left；觀察限於 shell，不監看編輯器子樹。
+
+只檢查 bounds 也會漏掉互相覆蓋：最初 480px 浮層與入口疊在一起，Help 看得到卻點不到。
+空間不足時向下展開，驗收同時檢查 elementFromPoint 與真點擊。Alt 單鍵判定須被其他鍵或
+pointer/mousedown 取消，避免 Alt+click 後誤開。Escape 要回原本 editor 焦點，不能回已隱藏的 top item。
+`check:menu` 用三寬度、全域 button 樣式、ribbon hide/show、鍵盤／焦點與 resize 驗上述行為。
+
+本輪選單驗收也遇到 CDP 平台鍵碼陷阱：將 Windows keyCode 原樣複製到
+nativeVirtualKeyCode，會讓 macOS Chrome 後續滑鼠回應延遲、resize 事件不再派送；
+單獨 resize 正常，完整鍵盤序列卻失敗。保留 key／code／windowsVirtualKeyCode、
+省略不正確的 native 欄位後，同順序四項檢查通過。驗收應等實際收合與 viewport 復原，
+不能只等固定 sleep；Alt+click 的 DOM 取消判定另外重播，避免引入無關的瀏覽器原生手勢。

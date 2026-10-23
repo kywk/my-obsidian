@@ -51,6 +51,11 @@ Server 在 HTML 中注入一段同步可用的 JSON，**必須早於任何 shim 
 讀出同一段字串，只存在記憶體並注入；**只允許 loopback**，不寫入 config。
 這是 server-local 的行為，不是 wire contract 的例外。
 
+boot-data 在 renderer 啟動前將 `localStorage["enable-plugin-" + vaultId]` 設成 `"true"`；
+官方 vault IPC 以相同 id 建立 appId。每次啟動都覆寫先前的限制模式決定，以省略信任彈窗；
+個別外掛啟用清單與 server policy 仍決定實際載入項目。localStorage 若被瀏覽器拒絕，
+只記一般警告，需允許網站儲存後重新載入。這與上面的 server 授權聲明設定分開。
+
 ---
 
 ## 2. `POST /api/fs`
@@ -217,6 +222,13 @@ Electron 的 main 不會回覆，因此 runtime **不得**用 `ipcRenderer.on()`
 | `set-menu` | `{ template }` | 重畫選單列 |
 | `update-menu-items` | `[{ itemId, eState }]`、`force?` | 以 `id \|\| appCommand` 更新 checked/enabled/visible/label |
 | `render-menu` | — | 在最後游標位置彈出 root menu |
+
+功能選單預設 `hidden`，以 fixed 浮層展開，不改 body 或 `.app-container` 的排版。
+入口放在原生 primary ribbon；ribbon 隱藏時改成浮動入口。F10 或單按 Alt 可展開，
+Alt 搭配其他鍵／滑鼠不觸發；Escape、外點、選取動作與 resize 收起。Escape 還原原焦點。
+窄寬度使用單列水平捲動，頂部項目與子選單仍必須實際可點擊；一般全域 button 樣式
+不可改變宿主控制項尺寸。`showBar()`／`hideBar()`／`isBarVisible()` 與 `getState().barVisible`
+供宿主與驗收觀察狀態，`isOpen()` 仍只計子選單／右鍵 popup。
 
 `context-menu` 是**唯一有 reply** 的頻道：renderer 送空請求，宿主必須回**非 null** 物件，
 否則 renderer 直接放棄右鍵選單：

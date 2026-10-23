@@ -14,7 +14,7 @@
 3. 改動前讀 `DESIGN.md` §11；動 fs/shim 前讀 `packages/shim/GAPS.md`。
 4. 完成後同步：`DESIGN.md`（新陷阱）、`GAPS.md`（shim 落差）、本檔（狀態）、`HANDOFF.md`（數字）。
 
-程式與驗收基準：`31891ec`（2026-10-24，外掛支援與版本化回音修正）——328 個單元測試、20 支 harness（229 項）。
+程式與驗收基準：`e11953a`（2026-10-24，自動信任與收合選單）——334 個單元測試、21 支 harness（239 項）。
 
 ---
 
@@ -38,7 +38,8 @@
 | 衝突副本 + 使用者可見通知 | `[x]` | `check:notices` 10/10 |
 | 斷線偵測與重連補償 | `[x]` | `check:resilience` 8/8 |
 | 多視窗 popout | `[x]` | `check:popout` 10/10（含重新載入後還原）、`check:parity` 8/8 |
-| 選單列／右鍵選單 | `[x]` | `check:menu` 11/11 |
+| 收合功能選單／右鍵選單 | `[x]` | `check:menu` 15/15；不占首列、三寬度、主題隔離、鍵盤與入口可達 |
+| 外掛信任彈窗省略 | `[x]` | `check:plugin-trust` 6/6；每次 boot 信任，保留個別停用清單 |
 | 列印／Export to PDF | `[x]` | `check:print` 21/21、`check:dialog` 14/14 |
 | 附件（圖片／PDF／Range／編碼檔名） | `[x]` | `check:attachment` 10/10 |
 | PWA manifest + 靜態資產 SW | `[x]` | `check:print` |
@@ -154,8 +155,8 @@
 
 ```bash
 npm --prefix packages/server ci # 第一次或 package-lock 變更後
-npm test                        # 328 個單元測試
-npm run check:spike             # 其餘 19 支見 README「驗收」
+npm test                        # 334 個單元測試
+npm run check:spike             # 其餘 20 支見 README「驗收」
 ```
 
 全部只對 vault **複本**執行。harness 的守門是 fail-closed：必須設定
