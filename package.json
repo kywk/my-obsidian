@@ -35,6 +35,7 @@
     "check:dataview": "node tools/dataview-check.mjs",
     "check:tasks": "node tools/tasks-check.mjs",
     "check:quickadd": "node tools/quickadd-check.mjs",
-    "check:origin-echo": "node tools/origin-echo-check.mjs"
+    "check:origin-echo": "node tools/origin-echo-check.mjs",
+    "check:plugin-trust": "node tools/plugin-trust-check.mjs"
   }
 }

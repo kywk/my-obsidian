@@ -149,6 +149,19 @@
 	window.__MYOBS_BOOT_OK = true;
 
 	/*
+	 * The server operator selects this vault and requests trusted plugins by
+	 * default. Seed the renderer's own per-vault decision before initialize()
+	 * runs, so first visits do not stop at its desktop trust prompt. The vault
+	 * IPC passes vaultId unchanged as appId; individual enabled plugin IDs and
+	 * the server policy still decide which plugins actually run.
+	 */
+	try {
+		window.localStorage.setItem("enable-plugin-" + window.__MYOBS.vaultId, "true");
+	} catch (err) {
+		console.warn("[my-obsidian] 無法套用外掛信任設定；請允許此網站使用 localStorage 後重新載入。");
+	}
+
+	/*
 	 * Per-session write token. fs-shim stamps it onto every mutation and
 	 * watch-shim drops WS events that carry it back (CONTRACTS.md §4), which is
 	 * what stops "our save -> reload -> plugin saves data.json -> reload" from
