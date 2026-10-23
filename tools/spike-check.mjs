@@ -43,6 +43,21 @@ function parseArgs(argv) {
   return out;
 }
 
+// Obsidian hides any path segment that starts with a dot (DESIGN §11.13), so
+// this is the file count the renderer is expected to load. Comparing against
+// the actual vault keeps the assertion meaningful for small vaults; a fixed
+// threshold only proved that the operator happened to own a large vault.
+function countVisibleFiles(dir) {
+  let count = 0;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith('.')) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) count += countVisibleFiles(full);
+    else if (entry.isFile()) count += 1;
+  }
+  return count;
+}
+
 // ------------------------------------------------------------------- main
 
 async function main() {
@@ -56,6 +71,7 @@ async function main() {
   assertNotLiveVault(args.vault);
 
   const terms = readTermsFromVendor();
+  const diskFileCount = countVisibleFiles(args.vault);
   const wsJsonPath = path.join(args.vault, '.obsidian', 'workspace.json');
   const wsBefore = fs.existsSync(wsJsonPath)
     ? fs.statSync(wsJsonPath).mtimeMs
@@ -179,9 +195,11 @@ async function main() {
     report.criteria.appExists = appReady;
     if (!appReady) throw new Error('window.app never appeared');
 
-    // 2. vault file count
-    report.facts.fileCount = await evaluate('app.vault.getFiles().length');
-    report.criteria.fileCountOver5000 = report.facts.fileCount > 5000;
+    // 2. vault file count. The boot-time value can be 0/partial because the
+    // scan is still running; the authoritative comparison happens after the
+    // metadata cache is ready.
+    report.facts.diskFileCount = diskFileCount;
+    report.facts.fileCountAtBoot = await evaluate('app.vault.getFiles().length');
 
     // 3. metadata cache
     let cacheReady = false;
@@ -211,8 +229,8 @@ async function main() {
     report.facts.loadedFiles = await evaluate(
       'app.vault.getAllLoadedFiles().length',
     ).catch(() => null);
-    report.criteria.fileCountOver5000 =
-      (report.facts.fileCountAfterCacheWait ?? report.facts.fileCount) > 5000;
+    report.criteria.fileCountMatchesDisk =
+      (report.facts.fileCountAfterCacheWait ?? 0) >= diskFileCount;
 
     // 4. write round-trip on a real note
     const writeResult = await evaluate(`(async () => {

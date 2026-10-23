@@ -18,7 +18,7 @@
 | `/api/fs` 與 `/v/*` 契約 | §5、`CONTRACTS.md` |
 | terms 閘與 dev mode | §8 |
 | 測試層次與 harness | §9 |
-| 實作期間的 17 個陷阱 | **§11** |
+| 實作期間的 19 個陷阱 | **§11** |
 
 ---
 
@@ -221,7 +221,7 @@ server config，再由此注入（契約欄位為 `termsText`，見 `CONTRACTS.m
 | 層 | 指令 | 項目數 | 涵蓋 |
 |---|---|---|---|
 | 單元 | `cd packages/server && npm test` | 254 | fs API、conflict、auth、consent、files/`/v/*`、watch token、proxy（含 DNS 硬化）、plugins、static、PUT 串流 |
-| 1 | `node tools/spike-check.mjs --vault <複本>` | 9 | boot、>5000 檔、metadata cache、文字往返、二進位往返、冷啟、workspace 隔離、零例外、良性錯誤不蓋畫面 |
+| 1 | `node tools/spike-check.mjs --vault <複本>` | 9 | boot、完整載入（檔案數與磁碟可見數相符）、metadata cache、文字往返、二進位往返、冷啟、workspace 隔離、零例外、良性錯誤不蓋畫面 |
 | 2 | `node tools/hotreload-check.mjs` | 4 | WS 連線、筆記外部變更、plugin 熱重載、回音過濾 |
 | 3 | `node tools/attachment-check.mjs` | 全部 | `/v/*` URL 形狀、位元組一致、瀏覽器實際解碼、Range、pdfjs、編碼檔名 |
 | 4 | `node tools/popout-check.mjs` | 8 | popout 開啟、同一 app 物件、指定筆記、獨立寫入、真實鍵盤輸入、deep link |
@@ -263,9 +263,12 @@ server config，再由此注入（契約欄位為 `termsText`，見 `CONTRACTS.m
 驗收對象是 實測 vault 的複本（10,150 檔、341 MB），**不是真實 vault**。
 執行方式：`node tools/spike-check.mjs --vault <複本路徑>`（零依賴，用 Node 內建 WebSocket 驅動本機 Chrome 的 CDP）。
 
+> 上表的 `> 5000` 是 2026-10-18 對大型 vault 的歷史紀錄。現行 harness 已改為
+> 與「磁碟可見檔案數」對照，不依賴 vault 規模，見 §11.18。
+
 ---
 
-## 11. Spike 期間發現的兩件事（必須保留的設計知識）
+## 11. 實作期間發現的設計知識（必須保留）
 
 ### 11.1 adapter 的序列化佇列，被 `readdir` 繞過 → 併發無上限
 
@@ -637,4 +640,33 @@ fatal detail 就是這一句。
 `--disable-background-networking`、`--disable-features=ChromeWhatsNewUI,…`；
 `listPageTargets()` 過濾 `chrome://` / `devtools://` / `edge://` target。
 若未來 Chrome 改行為，先檢查 harness 的 target 清單，不要先懷疑 popout 實作。
+
+### 11.18 驗收門檻不能綁死 vault 規模
+
+`spike-check` 原本用 `app.vault.getFiles().length > 5000` 當「完整掃描」的證據。
+那是 2026-10-18 對 10,034 篇 markdown 的實測 vault 寫下的數字，不是需求。
+換到只有 3,096 個 md（3,396 個可見檔案）的 vault 後，其餘 8 項全綠、只有這一項失敗：
+看起來像 renderer 壞了，實際上是測試資料比門檻小。
+
+修正：Node 端遞迴數「任何路徑段不以 `.` 開頭」的檔案（Obsidian 的 hidden 規則，§11.13），
+與 `app.vault.getFiles().length` 對照，斷言前者 `>=` 磁碟可見數。
+facts 同時保留 `diskFileCount`、`fileCountAtBoot`、`fileCountAfterCacheWait`，
+失敗時可以直接分辨「掃描沒完成」與「vault 本來就比較小」。
+
+> 教訓：驗收條件要描述「行為正確」，不是「我當時的 vault 有多大」。
+> 固定門檻會隨測試資料漂移，失敗訊息還會誤導下一個 agent 去修一個沒壞的 renderer。
+
+### 11.19 popout 的 `leaf.openFile()` 完成早於 view 置換
+
+`parity-check` 原本在 `await leaf.openFile(...)` 後固定等 600ms，再掃 popout leaf 的
+`view.file.path`。冷啟動或第一次載入該筆記時，600ms 不夠：leaf 仍顯示 host 的筆記，
+`paths` 只有 `scripts/README.md`。同一支 harness 第一次通過、第二次失敗（3,396 檔的 vault），
+很容易被誤判成 popout 壞了。
+
+`openFile()` 的 promise 只代表 workspace 接受請求；view 置換是之後的事件。
+修正：Node 端每 250ms 輪詢 popout leaves，直到目標路徑出現（上限 20 秒），
+失敗才回報最後的 `paths` 與 `activePath`。
+
+> 教訓：對 Obsidian workspace 的斷言要等「狀態成立」，不要等「大概夠久」。
+> 固定 sleep 在快機器上透過、在冷 cache 上失敗，是最難重現的那種 flaky。
 

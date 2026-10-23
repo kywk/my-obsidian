@@ -323,7 +323,10 @@ async function main() {
     report.criteria.noPluginWatch = realm.pluginWatch === 'undefined';
 
     // Open a *different* note inside the popout ---------------------------
-    const opened = await popoutEvaluate(`(async function () {
+    // openFile() resolves before the workspace has swapped the leaf's view;
+    // a fixed 600ms sleep was flaky on a cold metadata cache (the leaf was
+    // still showing the host note). Poll the leaf paths instead.
+    const openResult = await popoutEvaluate(`(async function () {
       const file = app.vault.getAbstractFileByPath(${JSON.stringify(popoutNote)});
       if (!file) return { ok: false, why: 'file missing' };
       let leaf = null;
@@ -333,21 +336,35 @@ async function main() {
       });
       if (!leaf) return { ok: false, why: 'no leaf in the popout document' };
       await leaf.openFile(file, { active: true });
-      await new Promise(function (resolve) { window.setTimeout(resolve, 600); });
-      // The popout can hold more than one leaf (the cloned host tab plus the
-      // note opened here), so scan every popout leaf instead of taking the
-      // first one. First-leaf ordering made this fail on vaults with fixture
-      // copies that share a basename.
+      return { ok: true };
+    })()`);
+    if (!openResult?.ok) {
+      throw new Error(`could not prepare the popout leaf: ${JSON.stringify(openResult)}`);
+    }
+
+    const readPopoutLeaves = () => popoutEvaluate(`(function () {
       var paths = [];
       app.workspace.iterateAllLeaves(function (candidate) {
         if (!candidate.containerEl || candidate.containerEl.ownerDocument !== document) return;
         if (candidate.view && candidate.view.file) paths.push(candidate.view.file.path);
       });
-      var owned = paths.indexOf(${JSON.stringify(popoutNote)}) !== -1 ? ${JSON.stringify(popoutNote)} : (paths[0] || null);
-      return { ok: true, activePath: (app.workspace.getActiveFile() || {}).path || null, ownedPath: owned, paths: paths };
+      return { activePath: (app.workspace.getActiveFile() || {}).path || null, paths: paths };
     })()`);
+    const openedDeadline = Date.now() + 20000;
+    let opened = null;
+    while (Date.now() < openedDeadline) {
+      opened = await readPopoutLeaves();
+      if (opened && opened.paths.includes(popoutNote)) break;
+      await sleep(250);
+    }
+    opened = opened || { activePath: null, paths: [] };
+    // The popout can hold more than one leaf (the cloned host tab plus the
+    // note opened here), so scan every popout leaf instead of taking the
+    // first one. First-leaf ordering made this fail on vaults with fixture
+    // copies that share a basename.
+    opened.ownedPath = opened.paths.includes(popoutNote) ? popoutNote : (opened.paths[0] || null);
     report.facts.popoutNoteOpened = opened;
-    if (!opened?.ok || opened.ownedPath !== popoutNote) {
+    if (opened.ownedPath !== popoutNote) {
       throw new Error(`could not open ${popoutNote} in the popout: ${JSON.stringify(opened)}`);
     }
     const popoutNoteText = await popoutEvaluate(

@@ -18,7 +18,7 @@
 
 1. **`README.md`** —— 這個專案是什麼、怎麼跑、能做與不能做什麼、疑難排解。
 2. **`AGENTS.md`** —— 7 條硬規則、文件路由與驗證門檻。這是護欄，違反它的改動一律不接受。
-3. **`docs/DESIGN.md` §11** —— **17 個陷阱**。這是全 repo 最省時間的一份：
+3. **`docs/DESIGN.md` §11** —— **19 個陷阱**。這是全 repo 最省時間的一份：
    每一個都是花了好幾小時、用 shipped artifact 或實測挖出來的，
    不知道就會重踩（例如「附件 URL 全部 404 的真正原因」、「`listAll()` 會弄壞檔案樹」）。
 4. **`docs/TODO.md`** —— 現況表（哪個能力由哪支 harness 驗收）、需要決策的 4 件事、
@@ -94,7 +94,8 @@ done
 ```
 
 **完成判準**：每一支都回報 `passed: true`（`plugin-install` 需要真實網路，離線時如實說明）。
-`check:spike` 現在是 9 項（新增良性 `ResizeObserver` 錯誤不得開 fatal 的斷言）。
+`check:spike` 現在是 9 項（新增良性 `ResizeObserver` 錯誤不得開 fatal 的斷言）；
+其中檔案數是與「磁碟可見檔案數」對照，不要求 vault 大於 5,000 檔。
 任何一支失敗 → 先修到全綠，再談新功能。
 
 harness 的慣例：`--port <n>`（Chrome 用 `n + 1000`）、`--json <path>` 保留完整輸出、
