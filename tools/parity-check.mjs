@@ -196,6 +196,15 @@ async function main() {
       30000,
     );
     await waitForPage(cdp, mainSession, 'app.vault.getFiles().length > 0', 30000);
+    // Opening a note in the popout goes through setViewState(); if the
+    // metadata cache is still initializing under load, that call can sit
+    // behind the cache and the leaf never swaps. Wait for it explicitly.
+    await waitForPage(
+      cdp,
+      mainSession,
+      '!!(app.metadataCache && app.metadataCache.initialized === true)',
+      30000,
+    );
     await sleep(500);
 
     // Two small notes: one stays in the host, one moves to the popout.
@@ -330,10 +339,19 @@ async function main() {
       const file = app.vault.getAbstractFileByPath(${JSON.stringify(popoutNote)});
       if (!file) return { ok: false, why: 'file missing' };
       let leaf = null;
+      let markdownLeaf = null;
+      let fallback = null;
       app.workspace.iterateAllLeaves(function (candidate) {
-        if (leaf || !candidate.containerEl || candidate.containerEl.ownerDocument !== document) return;
-        leaf = candidate;
+        if (!candidate.containerEl || candidate.containerEl.ownerDocument !== document) return;
+        if (!fallback) fallback = candidate;
+        const view = candidate.view || {};
+        const viewFile = view.file && view.file.path;
+        if (!leaf && viewFile === ${JSON.stringify(hostNote)}) leaf = candidate;
+        if (!markdownLeaf && (view.getViewType && view.getViewType() === 'markdown' || viewFile)) {
+          markdownLeaf = candidate;
+        }
       });
+      leaf = leaf || markdownLeaf || fallback;
       if (!leaf) return { ok: false, why: 'no leaf in the popout document' };
       await leaf.openFile(file, { active: true });
       return { ok: true };
@@ -343,12 +361,20 @@ async function main() {
     }
 
     const readPopoutLeaves = () => popoutEvaluate(`(function () {
-      var paths = [];
+      var leaves = [];
       app.workspace.iterateAllLeaves(function (candidate) {
         if (!candidate.containerEl || candidate.containerEl.ownerDocument !== document) return;
-        if (candidate.view && candidate.view.file) paths.push(candidate.view.file.path);
+        var view = candidate.view || {};
+        leaves.push({
+          type: view.getViewType ? view.getViewType() : null,
+          file: view.file && view.file.path || null
+        });
       });
-      return { activePath: (app.workspace.getActiveFile() || {}).path || null, paths: paths };
+      return {
+        activePath: (app.workspace.getActiveFile() || {}).path || null,
+        paths: leaves.filter(function (leaf) { return leaf.file; }).map(function (leaf) { return leaf.file; }),
+        leaves: leaves
+      };
     })()`);
     const openedDeadline = Date.now() + 20000;
     let opened = null;
