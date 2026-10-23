@@ -46,6 +46,11 @@
 	/** @type {Array<{at: number, id: string, file: string, action: string, ok: boolean, error: string | null}>} */
 	var events = [];
 	var pending = Object.create(null);
+	var running = Object.create(null);
+	var outcomes = Object.create(null);
+	var failedInstances = Object.create(null);
+	var observedManagers = new WeakSet();
+	var bootChecked = false;
 	var deferred = Object.create(null);
 	var unsubscribe = null;
 
@@ -60,6 +65,7 @@
 	var api = {
 		enabled: !readStoredFlag(),
 		events: events,
+		outcomes: outcomes,
 		subscribed: false,
 		reloadAll: reloadAll
 	};
@@ -200,7 +206,7 @@
 		if (context === "boot") {
 			detail = [
 				"外掛：" + id,
-				"狀態：已啟用（community-plugins.json）但 app.plugins.plugins 沒有實例。",
+				"狀態：已啟用，但載入失敗或未建立實例；建構成功不代表 onload 完成。",
 				"",
 				"可能原因：onload 拋錯、manifest.json／main.js 缺失、版本或 policy 不相容。",
 				"Obsidian 自己會在 console 印出 \"Plugin failure: " + id + "\" 與原始堆疊。"
@@ -235,6 +241,70 @@
 		return false;
 	}
 
+	// 1.14.4 stores the instance and sets _loaded before awaiting onload.
+	// Only enablePlugin's outcome can distinguish that partial instance from
+	// a healthy one. Observe the manager before its first async boot resumes.
+	function observeManager(plugins) {
+		if (!plugins || observedManagers.has(plugins) || typeof plugins.enablePlugin !== "function") return;
+		observedManagers.add(plugins);
+		var original = plugins.enablePlugin;
+		plugins.enablePlugin = async function (id) {
+			var manager = this;
+			try {
+				var result = await original.apply(manager, arguments);
+				var instance = manager.plugins && manager.plugins[id];
+				var ok = result !== false && !!instance && failedInstances[id] !== instance;
+				outcomes[id] = { ok: ok, at: Date.now() };
+				if (ok) {
+					delete failedInstances[id];
+					dismissPluginNotices(id);
+				} else {
+					if (instance) failedInstances[id] = instance;
+					if (bootChecked && !running[id]) reportFailure(id, "", new Error("enablePlugin 未完成載入；請檢查此外掛的 onload 與相容性"), "load");
+				}
+				return result;
+			} catch (error) {
+				outcomes[id] = { ok: false, at: Date.now() };
+				if (manager.plugins && manager.plugins[id]) failedInstances[id] = manager.plugins[id];
+				if (bootChecked && !running[id]) reportFailure(id, "", error, "load");
+				throw error;
+			}
+		};
+	}
+
+	function captureAssignment(target, key, observe) {
+		var descriptor = Object.getOwnPropertyDescriptor(target, key);
+		if (descriptor && (!descriptor.configurable || descriptor.writable === false || descriptor.get || descriptor.set)) {
+			observe(target[key]);
+			return;
+		}
+		if (target[key]) {
+			observe(target[key]);
+			return;
+		}
+		Object.defineProperty(target, key, {
+			configurable: true,
+			enumerable: descriptor ? descriptor.enumerable : true,
+			get: function () { return descriptor && descriptor.value; },
+			set: function (value) {
+				Object.defineProperty(target, key, {
+					configurable: descriptor ? descriptor.configurable : true,
+					enumerable: descriptor ? descriptor.enumerable : true,
+					writable: descriptor ? descriptor.writable : true,
+					value: value
+				});
+				observe(value);
+			}
+		});
+	}
+
+	function captureApp() {
+		captureAssignment(window, "app", function (app) {
+			// App creates plugins only after awaiting vault.setupConfig().
+			if (app) captureAssignment(app, "plugins", observeManager);
+		});
+	}
+
 	function settingsOpen() {
 		try {
 			return document.querySelector(".mod-settings") !== null;
@@ -243,12 +313,7 @@
 		}
 	}
 
-	/**
-	 * Reload one plugin. `disablePlugin(id, true)` marks the unload as *not*
-	 * user-initiated so Obsidian keeps the id in enabledPlugins and does not
-	 * rewrite community-plugins.json; `enablePlugin` then constructs a fresh
-	 * instance from the file on disk.
-	 */
+	/** Keep the enabled set intact; only disablePluginAndSave changes it. */
 	async function reloadPlugin(id, file) {
 		var plugins = pluginManager();
 		if (!plugins || typeof plugins.enablePlugin !== "function") {
@@ -268,7 +333,10 @@
 				return;
 			}
 
-			await plugins.disablePlugin(id, true);
+			await plugins.disablePlugin(id);
+			if (plugins.plugins && plugins.plugins[id]) {
+				throw new Error("外掛卸載未完成；請檢查 onunload，修正後重新整理頁面");
+			}
 
 			if (!isEnabled(plugins, id)) {
 				// Something else disabled it while we were unloading; enabling
@@ -279,17 +347,17 @@
 
 			var loaded = await plugins.enablePlugin(id);
 			var instance = plugins.plugins ? plugins.plugins[id] : undefined;
-			if (loaded === false || !instance) {
+			if (loaded === false || !instance || (outcomes[id] && outcomes[id].ok === false)) {
 				/*
 				 * enablePlugin returns false without throwing for several
 				 * reasons; the most common is a policy that disallows
 				 * community plugins (app.js checks policy.plugins from
-				 * sendSync("policy"), and CONTRACTS.md §1 injects "policy": {}).
+				 * sendSync("policy"), and the server must inject the desktop policy).
 				 * Naming it here saves the next person an afternoon.
 				 */
 				var policy = (window.__MYOBS && window.__MYOBS.policy) || {};
 				var reason =
-					"enablePlugin 未建立外掛實例（policy.plugins=" +
+					"enablePlugin 未完成載入（請檢查 onload；policy.plugins=" +
 					JSON.stringify(policy.plugins) + "）";
 				record(id, file, "reload", false, reason);
 				reportFailure(id, file, new Error(reason), "reload");
@@ -320,7 +388,11 @@
 		}
 		for (var i = 0; i < ids.length; i++) {
 			cancelDeferred(ids[i]);
-			await reloadPlugin(ids[i], "reloadAll");
+			if (pending[ids[i]]) {
+				clearTimeout(pending[ids[i]].timer);
+				delete pending[ids[i]];
+			}
+			await queueReload(ids[i], "reloadAll");
 		}
 	}
 
@@ -362,6 +434,32 @@
 		deferred[id] = entry;
 	}
 
+	function queueReload(id, file) {
+		if (running[id]) {
+			running[id].file = file;
+			return running[id].promise;
+		}
+		var entry = { file: file, promise: null };
+		running[id] = entry;
+		entry.promise = (async function () {
+			try {
+				while (entry.file) {
+					var next = entry.file;
+					entry.file = null;
+					if (next !== "reloadAll" && !api.enabled) continue;
+					if (next === "data.json" && settingsOpen()) {
+						deferDataReload(id, next);
+						continue;
+					}
+					await reloadPlugin(id, next);
+				}
+			} finally {
+				delete running[id];
+			}
+		})();
+		return entry.promise;
+	}
+
 	async function applyReload(id, file) {
 		if (!api.enabled) return;
 		if (file === "data.json" && settingsOpen()) {
@@ -369,7 +467,7 @@
 			return;
 		}
 		cancelDeferred(id);
-		await reloadPlugin(id, file);
+		await queueReload(id, file);
 	}
 
 	/**
@@ -408,8 +506,8 @@
 	// Nothing in the renderer reports "this plugin was enabled but never came
 	// up" (Obsidian's own toast for it is transient and fires per attempt).
 	// The state comparison below is the reliable observation point: after the
-	// plugin manager has settled, `enabledPlugins` minus `plugins` is exactly
-	// the set that failed to load. console.error is deliberately NOT patched --
+	// plugin manager has settled, compare the enabled set, instance map, and
+	// observed outcomes (including onload rejections). console.error is NOT patched --
 	// it throws away signal and would turn unrelated noise into UI cards.
 	// ---------------------------------------------------------------------
 
@@ -435,7 +533,7 @@
 	function reconcileBootFailures(plugins, enabled) {
 		var loaded = plugins.plugins || {};
 		var failed = enabled.filter(function (id) {
-			return !loaded[id];
+			return !loaded[id] || (outcomes[id] && outcomes[id].ok === false);
 		});
 
 		// policy.plugins is Obsidian's own gate (`policyAllows`). A missing or
@@ -474,7 +572,7 @@
 
 		for (var i = 0; i < failed.length; i += 1) {
 			record(failed[i], "boot", "boot", false, "enabled but not loaded");
-			reportFailure(failed[i], "boot", new Error("已啟用但未建立外掛實例"), "boot");
+			reportFailure(failed[i], "boot", new Error("已啟用但載入未完成"), "boot");
 		}
 		record(
 			"*",
@@ -502,6 +600,7 @@
 
 				var enabled = enabledIds(plugins);
 				var loaded = Object.keys(plugins.plugins || {}).sort();
+				var failed = Object.keys(outcomes).filter(function (id) { return !outcomes[id].ok; }).sort();
 				var manifests = Object.keys(plugins.manifests || {}).length;
 				var loading = plugins.loadingPluginId || null;
 				var restricted =
@@ -509,7 +608,7 @@
 
 				var signature =
 					enabled.join("|") + "::" + loaded.join("|") + "::" +
-					String(loading) + "::" + manifests;
+					String(loading) + "::" + manifests + "::" + failed.join("|");
 				if (signature !== lastSignature) {
 					lastSignature = signature;
 					lastChangeAt = Date.now();
@@ -523,6 +622,7 @@
 				var hasWork = enabled.length === 0 || manifests > 0;
 
 				if (settled && ready && hasWork) {
+					bootChecked = true;
 					done = true;
 					clearInterval(timer);
 					if (restricted) {
@@ -564,10 +664,13 @@
 		}
 	}
 
+	try { captureApp(); } catch (err) { record("*", "*", "observe", false, err); }
+
 	var waited = 0;
 	var appTimer = setInterval(function () {
 		waited += APP_POLL_MS;
-		if (window.app) {
+		if (window.app && window.app.plugins) {
+			observeManager(pluginManager());
 			clearInterval(appTimer);
 			try {
 				start();
