@@ -378,7 +378,7 @@ async function main() {
     const filteredBefore = await evaluate('window.__MYOBS_WATCH.state.filtered');
     const loadsBeforeEcho = await evaluate('window.__myobsProbeLoads || 0');
 
-    // (a) app.vault.modify() -> fs-shim stamps the token -> whole batch filtered.
+    // (a) app.vault.modify() -> fs-shim stamps the token -> own events filtered.
     const modifiedNote = notePath
       ? await evaluate(`(async function () {
           const f = app.vault.getAbstractFileByPath(${JSON.stringify(notePath)});

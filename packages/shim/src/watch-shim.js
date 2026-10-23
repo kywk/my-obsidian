@@ -32,7 +32,7 @@
 	 *
 	 * received   events parsed out of WS payloads
 	 * dispatched deliveries to at least one watcher (one per watcher)
-	 * filtered   events suppressed because the batch was our own echo
+	 * filtered   events suppressed because their token identifies our own echo
 	 */
 	var state = {
 		connected: false,
@@ -287,30 +287,24 @@
 		if (batch.length === 0) return;
 
 		/*
-		 * Echo suppression. The server tags the event that resulted from a
-		 * write carrying this session's token (fs-shim stamps it, see
-		 * TOKEN_OPS); those events are ours and must not re-enter the reload
+		 * Echo suppression. The server verifies the observed disk version
+		 * against a successful write carrying this session's token (fs-shim
+		 * stamps it, see TOKEN_OPS); our versions must not re-enter the reload
 		 * path, or "save plugin file -> reload -> plugin saves data.json ->
 		 * reload" never terminates.
 		 *
 		 * The filter is per event, not per batch. The server aggregates every
 		 * writer into one 150 ms window, so a batch routinely contains our own
 		 * writes next to a genuinely external edit; dropping the batch would
-		 * swallow the external edit. The suppressed-path set additionally drops
-		 * same-path siblings -- the server consumes an origin token on the first
-		 * event for a path, so chokidar's create+change pair for our own write
-		 * would otherwise leak the second half.
+		 * swallow the external edit. Even a same-path sibling may represent
+		 * an external version or another tab's write; only its own token can
+		 * establish provenance. The server retains matching versions across
+		 * batches, so repeated echoes remain tagged without client guesses.
 		 */
-		var suppressed = Object.create(null);
 		var deliverable = [];
 		for (var j = 0; j < batch.length; j++) {
 			var candidate = batch[j];
 			if (sessionToken && candidate.originToken === sessionToken) {
-				suppressed[candidate.path] = true;
-				state.filtered += 1;
-				continue;
-			}
-			if (suppressed[candidate.path] === true) {
 				state.filtered += 1;
 				continue;
 			}

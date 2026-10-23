@@ -4,7 +4,7 @@
  * Two invariants this file exists to protect:
  *
  * 1. An origin token survives until its TTL expires, so *every* event for a
- *    path is tagged -- not only the first one. Consuming the token on first use
+ *    unchanged version is tagged -- not only the first one. Consuming the token on first use
  *    left the second batch of a path untagged, which let a tab treat its own
  *    write as an external change (plugin data.json -> reload -> write -> ...).
  * 2. The registry stays bounded (TTL sweep + hard cap), and PUT /v/* can mark
@@ -31,6 +31,7 @@ import {
   createVaultWatcher,
   lookupOriginToken,
   recordOriginToken,
+  readOriginVersion,
 } from '../src/watch.js';
 
 /** Failure modes of a broken watcher are noise; only the assertions matter. */
@@ -225,9 +226,8 @@ describe('event tagging', () => {
 
     try {
       await watcher.ready;
-      recordOriginToken('notes/echo.md', 'token-echo');
-
       const target = await writeVaultFile('notes/echo.md', 'first version');
+      recordOriginToken('notes/echo.md', 'token-echo', await readOriginVersion({ root, rootReal: root }, target));
       const first = await waitFor(
         () => sink.events().find((event) => event.path === 'notes/echo.md'),
         { label: 'the first event for notes/echo.md' },
@@ -235,9 +235,10 @@ describe('event tagging', () => {
       assert.equal(first.originToken, 'token-echo');
       assert.equal(first.kind, 'create');
 
-      // Same path, a later batch: the token was recorded once and must still
-      // be attached. This is the behaviour the old consume-on-read broke.
-      await fs.promises.writeFile(target, 'second version');
+      // A delayed event for the same completed version must keep its token.
+      // A new external write is a different version, covered separately.
+      watcher.watcher.emit('change', 'notes/echo.md');
+      await watcher.flush();
       const second = await waitFor(
         () => sink.events().filter((event) => event.path === 'notes/echo.md')[1],
         { label: 'a second, separately batched event for notes/echo.md' },
@@ -265,8 +266,8 @@ describe('event tagging', () => {
 
     try {
       await watcher.ready;
-      store.record('notes/ttl.md', 'token-ttl');
       const target = await writeVaultFile('notes/ttl.md', 'inside the ttl');
+      store.record('notes/ttl.md', 'token-ttl', await readOriginVersion({ root, rootReal: root }, target));
 
       const tagged = await waitFor(
         () => sink.events().find((event) => event.path === 'notes/ttl.md'),
@@ -299,10 +300,10 @@ describe('event tagging', () => {
 
     try {
       await watcher.ready;
-      recordOriginToken('notes/two-tabs.md', 'tab-a');
-      recordOriginToken('notes/two-tabs.md', 'tab-b');
-
-      await writeVaultFile('notes/two-tabs.md', 'written by tab-b');
+      const target = await writeVaultFile('notes/two-tabs.md', 'written by tab-a');
+      recordOriginToken('notes/two-tabs.md', 'tab-a', await readOriginVersion({ root, rootReal: root }, target));
+      await fs.promises.writeFile(target, 'written by tab-b');
+      recordOriginToken('notes/two-tabs.md', 'tab-b', await readOriginVersion({ root, rootReal: root }, target));
       const event = await waitFor(
         () => sink.events().find((candidate) => candidate.path === 'notes/two-tabs.md'),
         { label: 'the event for notes/two-tabs.md' },

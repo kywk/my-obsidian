@@ -21,15 +21,15 @@
  * mutation.
  */
 
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { once } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 import { finished } from 'node:stream/promises';
 
-import { resolveVaultAbsolute } from './paths.js';
+import { resolveVaultAbsolute, relativeFromVault } from './paths.js';
 import { contentTypeFor } from './static.js';
-import { recordOriginToken } from './watch.js';
+import { recordOriginToken, captureOriginVersion, runOriginMutation } from './watch.js';
 
 /**
  * Types that static.js's table does not cover but Obsidian's attachment views
@@ -264,7 +264,7 @@ function toAbsoluteInput(decoded) {
  * @param {import('fastify').FastifyRequest} request
  * @param {string} tempPath
  * @param {number} limit
- * @returns {Promise<number>} bytes written
+ * @returns {Promise<{ written: number, digest: string }>}
  * @throws {NodeJS.ErrnoException}
  */
 async function streamRequestBodyToFile(request, tempPath, limit) {
@@ -279,6 +279,7 @@ async function streamRequestBodyToFile(request, tempPath, limit) {
   }
 
   let written = 0;
+  const hash = createHash('sha256');
   try {
     await new Promise((resolve, reject) => {
       let settled = false;
@@ -296,6 +297,7 @@ async function streamRequestBodyToFile(request, tempPath, limit) {
       };
       const onData = (chunk) => {
         written += chunk.length;
+        hash.update(chunk);
         if (written > limit) {
           const error = new Error(`request body exceeds ${limit} bytes`);
           // @ts-expect-error errno-style code for statusForFileError()
@@ -331,7 +333,7 @@ async function streamRequestBodyToFile(request, tempPath, limit) {
     const flushed = finished(out);
     out.end();
     await flushed;
-    return written;
+    return { written, digest: hash.digest('hex') };
   } catch (err) {
     /*
      * Finish the file instead of destroying it: fs.WriteStream.destroy()
@@ -402,7 +404,7 @@ async function handleStreamingPut(request, reply, vault, bodyLimit) {
 
   let renamed = false;
   try {
-    await streamRequestBodyToFile(request, tempPath, bodyLimit);
+    const uploaded = await streamRequestBodyToFile(request, tempPath, bodyLimit);
 
     // A client that vanished after the last chunk but before rename must not
     // get a half-written upload promoted. (`complete` is not usable here:
@@ -412,8 +414,16 @@ async function handleStreamingPut(request, reply, vault, bodyLimit) {
       return;
     }
 
-    await fs.promises.rename(tempPath, destination);
-    renamed = true;
+    await runOriginMutation([resolved.abs, destination], async () => {
+      if (request.raw.readableAborted === true || reply.raw.destroyed) return;
+      await fs.promises.rename(tempPath, destination);
+      renamed = true;
+      const version = await captureOriginVersion(destination, uploaded.digest);
+      const writeToken = request.headers['x-write-token'];
+      const token = typeof writeToken === 'string' ? writeToken : undefined;
+      recordOriginToken(resolved.rel, token, version);
+      if (resolved.real !== resolved.abs) recordOriginToken(relativeFromVault(vault, resolved.real), token, version);
+    });
   } catch (err) {
     // The response socket is gone when the uploader disconnected; there is
     // nobody to send the error to. The finally block still removes the temp.
@@ -427,13 +437,7 @@ async function handleStreamingPut(request, reply, vault, bodyLimit) {
     if (!renamed) await fs.promises.rm(tempPath, { force: true }).catch(() => {});
   }
 
-  // Recorded after the rename succeeded: a failed write must not leave a token
-  // behind that would tag the next external edit to this path.
-  const writeToken = request.headers['x-write-token'];
-  if (typeof writeToken === 'string' && writeToken !== '') {
-    recordOriginToken(resolved.rel, writeToken);
-  }
-
+  if (!renamed) return;
   reply.raw.statusCode = 204;
   reply.raw.end();
 }

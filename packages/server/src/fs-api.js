@@ -15,7 +15,7 @@ import {
   vaultError,
 } from './paths.js';
 import { saveConflictCopy } from './conflict.js';
-import { recordOriginToken } from './watch.js';
+import { recordOriginToken, captureOriginVersion, readOriginVersion, hashOriginContent, runOriginMutation } from './watch.js';
 
 /**
  * @typedef {import('./paths.js').Vault} Vault
@@ -103,24 +103,31 @@ async function maybeSaveConflict(resolved, args) {
 }
 
 /**
+ * @param {Vault} vault
  * @param {ResolvedPath} resolved
  * @param {string | undefined} token
+ * @param {string | undefined} expectedDigest
+ * @param {boolean} missing
+ * @param {boolean} followTarget
  */
-function rememberToken(resolved, token) {
-  if (typeof token === 'string' && token !== '') {
-    recordOriginToken(resolved.rel, token);
+async function rememberToken(vault, resolved, token, expectedDigest, missing = false, followTarget = false) {
+  const version = missing ? { kind: 'missing' } : await captureOriginVersion(resolved.real, expectedDigest);
+  recordOriginToken(resolved.rel, token, version);
+  if (followTarget && resolved.real !== resolved.abs) {
+    recordOriginToken(relativeFromVault(vault, resolved.real), token, version);
   }
 }
 
 /**
+ * @param {Vault} vault
  * @param {ResolvedPath} resolved
  * @param {string | undefined} conflictSavedAs
  * @param {string | undefined} token
- * @param {boolean} record
+ * @param {string | undefined} expectedDigest
  * @returns {Promise<{ mtimeMs: number, size: number, conflictSavedAs?: string }>}
  */
-async function writeResult(resolved, conflictSavedAs, token, record) {
-  if (record) rememberToken(resolved, token);
+async function writeResult(vault, resolved, conflictSavedAs, token, expectedDigest) {
+  await rememberToken(vault, resolved, token, expectedDigest, false, true);
   // mtime must be the value the kernel actually assigned, so stat after write.
   const st = await fs.promises.stat(resolved.abs);
   /** @type {{ mtimeMs: number, size: number, conflictSavedAs?: string }} */
@@ -152,6 +159,11 @@ async function writeFileOp(vault, relativePath, args, kind, append) {
   }
 
   const conflictSavedAs = await maybeSaveConflict(resolved, args);
+  let expectedDigest = hashOriginContent(data);
+  if (append) {
+    const before = await readOriginVersion(vault, resolved.real, data);
+    if (before?.kind !== 'missing') expectedDigest = before?.digest;
+  }
 
   if (append) {
     if (kind === 'text') {
@@ -165,7 +177,7 @@ async function writeFileOp(vault, relativePath, args, kind, append) {
     await fs.promises.writeFile(resolved.abs, /** @type {Buffer} */ (data));
   }
 
-  return writeResult(resolved, conflictSavedAs, token, true);
+  return writeResult(vault, resolved, conflictSavedAs, token, expectedDigest);
 }
 
 /**
@@ -241,7 +253,7 @@ async function rmdirOp(vault, relativePath, args) {
   } else {
     await fs.promises.rmdir(resolved.abs);
   }
-  rememberToken(resolved, typeof args.token === 'string' ? args.token : undefined);
+  await rememberToken(vault, resolved, typeof args.token === 'string' ? args.token : undefined, undefined, true);
   return null;
 }
 
@@ -261,7 +273,7 @@ async function removeOp(vault, relativePath, args) {
     throw vaultError('EISDIR', `is a directory: ${resolved.rel}`);
   }
   await fs.promises.unlink(resolved.abs);
-  rememberToken(resolved, typeof args.token === 'string' ? args.token : undefined);
+  await rememberToken(vault, resolved, typeof args.token === 'string' ? args.token : undefined, undefined, true);
   return null;
 }
 
@@ -280,10 +292,13 @@ async function renameOp(vault, from, args) {
     throw vaultError('EPERM', 'refusing to rename the vault root');
   }
 
+  const before = await readOriginVersion(vault, source.real);
   await fs.promises.rename(source.abs, destination.abs);
   const token = typeof args.token === 'string' ? args.token : undefined;
-  rememberToken(source, token);
-  rememberToken(destination, token);
+  await rememberToken(vault, source, token, undefined, true);
+  // rename replaces a destination symlink rather than writing through it.
+  const committedDestination = await resolveVaultPath(vault, to);
+  await rememberToken(vault, committedDestination, token, before?.digest);
   return null;
 }
 
@@ -309,6 +324,7 @@ async function copyOp(vault, from, args) {
   }
 
   const st = await fs.promises.lstat(source.abs);
+  const before = await readOriginVersion(vault, source.real);
   if (st.isDirectory() && !st.isSymbolicLink()) {
     // The lexical check above misses aliases; compare the resolved roots too.
     const relativeReal = path.relative(source.real, destination.real);
@@ -328,10 +344,7 @@ async function copyOp(vault, from, args) {
     await fs.promises.copyFile(source.abs, destination.abs);
   }
 
-  rememberToken(
-    destination,
-    typeof args.token === 'string' ? args.token : undefined,
-  );
+  await rememberToken(vault, destination, typeof args.token === 'string' ? args.token : undefined, before?.digest, false, true);
   return null;
 }
 
@@ -347,8 +360,9 @@ async function utimesOp(vault, relativePath, args) {
   // ctime is inode-change time and cannot be set from userspace. If the shim
   // sends ctimeMs we accept the field but deliberately do not fake it.
   const seconds = mtimeMs / 1000;
+  const before = await readOriginVersion(vault, resolved.real);
   await fs.promises.utimes(resolved.abs, seconds, seconds);
-  rememberToken(resolved, typeof args.token === 'string' ? args.token : undefined);
+  await rememberToken(vault, resolved, typeof args.token === 'string' ? args.token : undefined, before?.digest, false, true);
   return null;
 }
 
@@ -443,8 +457,9 @@ async function execute(vault, op, relativePath, args) {
       return listDirectory(vault, relativePath);
 
     case 'mkdir': {
-      const { abs } = await resolveVaultPath(vault, relativePath);
-      await fs.promises.mkdir(abs, { recursive: true });
+      const resolved = await resolveVaultPath(vault, relativePath);
+      await fs.promises.mkdir(resolved.abs, { recursive: true });
+      await rememberToken(vault, resolved, typeof args.token === 'string' ? args.token : undefined);
       return null;
     }
 
@@ -506,7 +521,19 @@ export async function handleFsRequest(vault, body) {
     const resolvedPath =
       relativePath === undefined || relativePath === null ? '' : relativePath;
 
-    const result = await execute(vault, op, resolvedPath, args);
+    const mutations = new Set(['write', 'writeBinary', 'append', 'appendBinary', 'mkdir', 'rmdir', 'remove', 'rename', 'copy', 'utimes']);
+    let result;
+    if (mutations.has(op)) {
+      const source = await resolveVaultPath(vault, resolvedPath);
+      const paths = [source.abs, source.real];
+      if (op === 'rename' || op === 'copy') {
+        const destination = await resolveVaultPath(vault, requireString(args.to, 'to'));
+        paths.push(destination.abs, destination.real);
+      }
+      result = await runOriginMutation(paths, () => execute(vault, op, resolvedPath, args));
+    } else {
+      result = await execute(vault, op, resolvedPath, args);
+    }
     return { ok: true, result };
   } catch (err) {
     return toErrorResponse(err);

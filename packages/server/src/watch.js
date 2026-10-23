@@ -1,54 +1,19 @@
 /**
- * Chokidar watcher + write-token registry for /api/watch.
- *
- * Events are aggregated for 150 ms. A write that carried a token records that
- * token against the path it touched, and *every* event for that path during
- * the following TOKEN_TTL_MS carries it, so the originating browser tab can
- * ignore the echo of its own write (CONTRACTS.md §4).
- *
- * `originToken` therefore means "this path was most recently written by this
- * token", not "this event was caused by that write". The wider meaning is the
- * one that makes echo filtering correct, because the two failure modes are not
- * symmetric:
- *
- * - A false negative (our own event arrives untagged) is unbounded: the tab
- *   treats its own write as an external change, reloads the plugin, the plugin
- *   writes data.json again, and the loop never terminates on its own.
- *   Consuming the token on first use produced exactly that hole for any path
- *   producing events in two different batches -- chokidar's create+change pair
- *   for a new file, or a plugin's next save.
- * - A false positive (an external edit inside the TTL window is tagged with
- *   our token) is bounded: it delays one reconcile for that path. Opening the
- *   file re-reads it from disk anyway, and the next write to the path is
- *   tagged with whoever wrote last.
- *
- * So the filter is deliberately biased towards suppression, and the TTL only
- * has to outlive "save -> reload -> write again", not the write itself.
- * 30 s is ~100x the 300 ms awaitWriteFinish stability threshold.
- *
- * Multiple writers of one path: the registry keeps the *last* writer (the
- * token is replaced, not accumulated). One `originToken` string per event is
- * all the wire contract carries, and "the token whose write the current disk
- * content came from" is the only useful single answer. Keeping the first
- * writer would be actively wrong: the second writer's own echo would come back
- * untagged, so the tab holding the newest content would be the one that loops,
- * while the tab with the stale buffer keeps it -- and overwrites the newer
- * content on its next save, the exact hazard DESIGN.md §6 exists to prevent.
- *
- * Residual limit: two tabs ping-ponging on one path both see the other's write
- * as external, which is indistinguishable from a real external writer doing
- * the same thing. A single-token-per-event contract cannot express "both tabs
- * wrote in this batch" without a wire change; see packages/shim/GAPS.md.
+ * Watch events carry a token only while the observed disk version matches a
+ * successful browser mutation. Matching versions survive multiple batches;
+ * TTL bounds retention, never authorizes suppression of a different version.
  */
 
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { watch } from 'chokidar';
+import { resolveVaultPath, relativeFromVault } from './paths.js';
 
 const IGNORED_SEGMENTS = new Set(['.git', '.docusaurus', 'node_modules']);
 const IGNORED_RELATIVE_FILES = new Set(['.obsidian/workspace.json']);
 
-/** How long a recorded write keeps tagging events for its path. */
+/** How long a successful version remains eligible for echo matching. */
 const TOKEN_TTL_MS = 30_000;
 /**
  * Hard cap on remembered paths. Entries only exist for paths written within
@@ -79,12 +44,15 @@ function normalizeEventPath(value) {
 }
 
 /**
+ * @typedef {{ kind: 'file' | 'directory' | 'missing', stamp?: string, digest?: string, mtimeMs?: number, size?: number }} OriginVersion
+ * @typedef {{ token: string, expiresAt: number, version?: OriginVersion }} OriginEntry
  * @typedef {object} OriginTokenStore
- * @property {(relativePath: string, token: string) => void} record Remember that
- *   `relativePath` was just written with `token`.
- * @property {(relativePath: string) => string | undefined} lookup The token of
- *   the most recent write for `relativePath`, or undefined when there is none
- *   in the TTL window. Non-consuming: repeated lookups return the same token.
+ * @property {(relativePath: string, token: string, version?: OriginVersion) => void} record
+ * @property {(relativePath: string, version?: OriginVersion) => string | undefined} lookup
+ *   With a version, mismatches invalidate the record; without one this is a
+ *   diagnostic lookup. A matching version is never consumed.
+ * @property {(relativePath: string) => OriginEntry | undefined} peek
+ * @property {(relativePath: string) => void} forget
  * @property {() => void} clear
  * @property {number} size Number of remembered paths (bounded by maxEntries).
  */
@@ -105,7 +73,7 @@ export function createOriginTokenStore(options = {}) {
   const maxEntries = options.maxEntries ?? MAX_ORIGIN_TOKENS;
   const now = options.now ?? Date.now;
 
-  /** @type {Map<string, { token: string, expiresAt: number }>} */
+  /** @type {Map<string, OriginEntry>} */
   const entries = new Map();
   /** Timestamp of the next allowed full sweep. */
   let nextSweepAt = 0;
@@ -131,7 +99,7 @@ export function createOriginTokenStore(options = {}) {
   }
 
   return {
-    record(relativePath, token) {
+    record(relativePath, token, version) {
       if (typeof relativePath !== 'string' || typeof token !== 'string' || token === '') {
         return;
       }
@@ -143,11 +111,11 @@ export function createOriginTokenStore(options = {}) {
       // evicts the least recently written path, and a hot path (plugin
       // data.json) must not look "old" only because it was seen first.
       entries.delete(key);
-      entries.set(key, { token, expiresAt: clock + ttlMs });
+      entries.set(key, { token, version, expiresAt: clock + ttlMs });
       prune(clock);
     },
 
-    lookup(relativePath) {
+    lookup(relativePath, version) {
       if (typeof relativePath !== 'string') return undefined;
       const key = normalizeEventPath(relativePath);
       const entry = entries.get(key);
@@ -163,7 +131,20 @@ export function createOriginTokenStore(options = {}) {
         prune(clock);
         return undefined;
       }
+      if (arguments.length > 1 && !sameOriginVersion(entry.version, version)) {
+        entries.delete(key);
+        return undefined;
+      }
       return entry.token;
+    },
+
+    peek(relativePath) {
+      this.lookup(relativePath);
+      return entries.get(normalizeEventPath(relativePath));
+    },
+
+    forget(relativePath) {
+      entries.delete(normalizeEventPath(relativePath));
     },
 
     clear() {
@@ -181,19 +162,21 @@ export function createOriginTokenStore(options = {}) {
 const originTokenStore = createOriginTokenStore();
 
 /**
- * Remember that `relativePath` is about to change because of a request that
- * carried `token`.
+ * Record only a successfully completed version. Tokenless writes and failed
+ * version capture revoke previous ownership instead of inheriting its token.
  *
  * @param {string} relativePath
- * @param {string} token
+ * @param {string | undefined} token
+ * @param {OriginVersion | undefined} version
  */
-export function recordOriginToken(relativePath, token) {
-  originTokenStore.record(relativePath, token);
+export function recordOriginToken(relativePath, token, version) {
+  if (!token || !version) originTokenStore.forget(relativePath);
+  else originTokenStore.record(relativePath, token, version);
 }
 
 /**
- * The token to attach to an event for `relativePath`, if any (see the file
- * header for what the field means).
+ * Diagnostic lookup of the last recorded owner. Event delivery additionally
+ * verifies the disk version and never relies on this lookup alone.
  *
  * @param {string} relativePath
  * @returns {string | undefined}
@@ -205,6 +188,94 @@ export function lookupOriginToken(relativePath) {
 /** Exposed for tests/diagnostics. */
 export function clearOriginTokens() {
   originTokenStore.clear();
+}
+
+/** A content hash comes from the request/source, never arbitrary post-write data. */
+export function hashOriginContent(data) {
+  return createHash('sha256').update(data).digest('hex');
+}
+
+function statStamp(st) {
+  return [st.dev, st.ino, st.mode, st.size, st.mtimeNs, st.ctimeNs, st.birthtimeNs].join(':');
+}
+
+function sameOriginVersion(left, right) {
+  return left !== undefined && right !== undefined &&
+    left.kind === right.kind && left.stamp === right.stamp && left.digest === right.digest;
+}
+
+/**
+ * Capture the post-mutation metadata with the expected content supplied by the
+ * writer. A racing external replacement cannot become ours merely by winning
+ * the stat: its bytes must still match the request when the watcher checks.
+ */
+export async function captureOriginVersion(absolute, expectedDigest) {
+  try {
+    const st = await fs.promises.lstat(absolute, { bigint: true });
+    if (st.isDirectory()) return { kind: 'directory', stamp: statStamp(st) };
+    if (!st.isFile() || typeof expectedDigest !== 'string') return undefined;
+    return { kind: 'file', stamp: statStamp(st), digest: expectedDigest };
+  } catch (error) {
+    return undefined;
+  }
+}
+
+/**
+ * Hash through a fixed descriptor and reject samples that changed while read
+ * or were replaced at the path. Validate the opened descriptor against a
+ * vault-contained path before hashing bytes.
+ */
+export async function readOriginVersion(vault, absolute, suffix) {
+  let handle;
+  try {
+    const lst = await fs.promises.lstat(absolute, { bigint: true });
+    if (lst.isDirectory()) return { kind: 'directory', stamp: statStamp(lst), mtimeMs: Number(lst.mtimeNs) / 1e6, size: Number(lst.size) };
+    if (!lst.isFile()) return undefined;
+    handle = await fs.promises.open(absolute, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const before = await handle.stat({ bigint: true });
+    // O_NOFOLLOW protects only the last component. Revalidate the namespace
+    // after opening, then match the descriptor before reading any bytes: an
+    // ancestor can have become an outside symlink since the caller resolved it.
+    if (!before.isFile() || statStamp(lst) !== statStamp(before)) return undefined;
+    const verified = await resolveVaultPath(vault, relativeFromVault(vault, absolute));
+    if (verified.real !== absolute) return undefined;
+    const verifiedStat = await fs.promises.lstat(verified.real, { bigint: true });
+    if (statStamp(before) !== statStamp(verifiedStat)) return undefined;
+    const hash = createHash('sha256');
+    for await (const chunk of handle.createReadStream({ autoClose: false })) hash.update(chunk);
+    if (suffix !== undefined) hash.update(suffix);
+    const after = await handle.stat({ bigint: true });
+    const current = await fs.promises.lstat(absolute, { bigint: true });
+    if (statStamp(before) !== statStamp(after) || statStamp(after) !== statStamp(current)) return undefined;
+    return { kind: 'file', stamp: statStamp(after), digest: hash.digest('hex'), mtimeMs: Number(after.mtimeNs) / 1e6, size: Number(after.size) };
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return { kind: 'missing' };
+    return undefined;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+// Reserve every touched path before waiting so opposite-direction renames
+// cannot deadlock. Only the commit of a streamed upload enters this queue.
+const mutations = new Map();
+export async function runOriginMutation(absolutePaths, operation) {
+  const keys = [...new Set(absolutePaths.map(value => path.resolve(value)))];
+  const previous = keys.map(key => mutations.get(key)).filter(Boolean);
+  let release;
+  const done = new Promise(resolve => { release = resolve; });
+  for (const key of keys) mutations.set(key, done);
+  await Promise.all(previous);
+  try {
+    return await operation();
+  } finally {
+    for (const key of keys) if (mutations.get(key) === done) mutations.delete(key);
+    release();
+  }
+}
+
+async function awaitOriginMutation(absolute) {
+  while (mutations.has(absolute)) await mutations.get(absolute);
 }
 
 /**
@@ -253,6 +324,8 @@ export function createVaultWatcher(options) {
   /** @type {NodeJS.Timeout | null} */
   let timer = null;
   const ignored = makeIgnoreMatcher(vaultPath);
+  const canonicalRoot = fs.realpathSync(vaultPath);
+  const vault = { root: canonicalRoot, rootReal: canonicalRoot };
 
   const watcher = watch(vaultPath, {
     cwd: vaultPath,
@@ -310,22 +383,41 @@ export function createVaultWatcher(options) {
 
     const events = await Promise.all(
       batch.map(async ([rel, kind]) => {
-        let mtimeMs = 0;
-        let size = 0;
-        if (kind !== 'delete') {
-          try {
-            const st = await fs.promises.stat(path.join(vaultPath, rel));
-            mtimeMs = st.mtimeMs;
-            size = st.size;
-          } catch {
-            // The file vanished again within the debounce window.
+        const absolute = path.join(canonicalRoot, rel);
+        for (;;) {
+          await awaitOriginMutation(absolute);
+          const entry = tokenStore.peek(rel);
+          let resolved;
+          let version;
+          if (entry) {
+            try {
+              resolved = await resolveVaultPath(vault, rel);
+              await awaitOriginMutation(resolved.real);
+              version = await readOriginVersion(vault, resolved.real);
+            } catch {
+              // An external symlink must not turn version checks into reads
+              // outside the vault. An unverified version is never our echo.
+            }
           }
+          let mtimeMs = version?.mtimeMs ?? 0;
+          let size = version?.size ?? 0;
+          if (!version && (!entry || resolved) && kind !== 'delete') {
+            try {
+              const st = await fs.promises.stat(absolute);
+              mtimeMs = st.mtimeMs;
+              size = st.size;
+            } catch {
+              // The file vanished again within the debounce window.
+            }
+          }
+          // A new write during hashing invalidates this sample, not the new
+          // writer's record. Wait for it and compare its completed version.
+          if (mutations.has(absolute) || (resolved && mutations.has(resolved.real)) || tokenStore.peek(rel) !== entry) continue;
+          const event = { path: rel, kind, mtimeMs, size };
+          const token = entry ? tokenStore.lookup(rel, version) : undefined;
+          if (token !== undefined) event.originToken = token;
+          return event;
         }
-        /** @type {WatchEvent} */
-        const event = { path: rel, kind, mtimeMs, size };
-        const token = tokenStore.lookup(rel);
-        if (token !== undefined) event.originToken = token;
-        return event;
       }),
     );
 
