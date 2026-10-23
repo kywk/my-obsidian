@@ -7,6 +7,17 @@
 
 ---
 
+## 接手順序
+
+1. 讀 `AGENTS.md` 與 `docs/HANDOFF.md`，跑「5 分鐘最小接手」。
+2. 從下面挑一個 `[ ]` 或 `[!]`；先確認它對應的 harness／驗收。
+3. 改動前讀 `DESIGN.md` §11；動 fs/shim 前讀 `packages/shim/GAPS.md`。
+4. 完成後同步：`DESIGN.md`（新陷阱）、`GAPS.md`（shim 落差）、本檔（狀態）、`HANDOFF.md`（數字）。
+
+目前 baseline：`b87612b`（2026-10-23）——254 個單元測試、11 支 harness、dev mode。
+
+---
+
 ## 現況
 
 | 能力 | 狀態 | 驗收 |
@@ -48,6 +59,14 @@
 - [!] **多使用者／登入**
   目前只有單一共用 token。真正的登入會牽動 session、per-user workspace、權限模型。
   在沒有共編需求前不建議做。
+
+---
+
+## 建議下一步
+
+1. **真實 vault 的 dogfooding**：用複本實際使用一週，重點看社群外掛、附件、桌面版並寫 conflict。
+2. **再決定 4 個決策**：目前建議維持 `child_process` 拒絕、多使用者暫緩；proxy fallback 與多 vault 等有明確需求再開。
+3. **文件缺口**：`DESIGN.md` §11 與 `GAPS.md` 已同步到 baseline；下一輪有新陷阱就補，不要讓它們再次過期。
 
 ---
 

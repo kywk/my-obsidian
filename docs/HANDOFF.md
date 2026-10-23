@@ -17,20 +17,36 @@
 ## 先讀這四份（依序，讀完再開工）
 
 1. **`README.md`** —— 這個專案是什麼、怎麼跑、能做與不能做什麼、疑難排解。
-2. **`AGENTS.md`** —— 7 條硬規則。這是護欄，違反它的改動一律不接受。
-3. **`docs/DESIGN.md` §11** —— **14 個陷阱**。這是全 repo 最省時間的一份：
+2. **`AGENTS.md`** —— 7 條硬規則、文件路由與驗證門檻。這是護欄，違反它的改動一律不接受。
+3. **`docs/DESIGN.md` §11** —— **17 個陷阱**。這是全 repo 最省時間的一份：
    每一個都是花了好幾小時、用 shipped artifact 或實測挖出來的，
    不知道就會重踩（例如「附件 URL 全部 404 的真正原因」、「`listAll()` 會弄壞檔案樹」）。
 4. **`docs/TODO.md`** —— 現況表（哪個能力由哪支 harness 驗收）、需要決策的 4 件事、
    已知缺陷與風險。
 
 需要線路細節時再查 **`docs/CONTRACTS.md`**（server ↔ shim 的每一條契約與錯誤碼語意）。
+shim 的已知落差查 **`packages/shim/GAPS.md`**。
+
+---
+
+## 5 分鐘最小接手
+
+```bash
+npm --prefix packages/server ci
+npm test                                  # 254/254
+export MYOBS_LIVE_VAULT=/path/to/real-vault
+npm run check:spike -- --vault <copy>     # 9/9
+npm run dev -- --vault <copy>             # 另開終端；app 能 boot、沒有 fatal
+```
+
+四項都成立才算拿到可用基準；完整 11 支見下一節。**不要先改 code 再回頭補驗證。**
 
 ---
 
 ## 現況（2026-10-23 baseline 修正）
 
-- 11 個 commit、76 個追蹤檔案（以 `git log -1` / `git ls-files | wc -l` 為準）
+- 功能 baseline：`b87612b`（dev mode + 驗收基準修正）；目前 HEAD 以 `git log -1` 為準
+- 76 個追蹤檔案（以 `git ls-files | wc -l` 為準）
 - Node 22；server 與 shim 都是 **plain JavaScript，沒有 build step**
 - 254 個單元測試 + **11 支零依賴 CDP harness**（104 項斷言；`check:spike` 9 項）
 - renderer 是**未修改**的官方 Obsidian 1.14.4（`app.js` 3,942,126 bytes），
@@ -39,7 +55,7 @@
 - 本機開發可用 `npm run dev -- --vault <copy>`（或 `npm start -- --vault <copy> --dev`）：
   跳過同意畫面、只允許 loopback、從 `vendor/obsidian/app.js` 讀字串注入，不寫入 config
 
-實測數字（作者的本機 vault，10,150 檔 / 341 MB）：
+實測數字（10,150 檔 / 341 MB 的 vault）：
 
 | 項目 | 數字 |
 |---|---|

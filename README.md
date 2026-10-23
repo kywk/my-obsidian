@@ -9,6 +9,10 @@
 Obsidian 1.14.4 · Node 22 · 254 個單元測試 · 11 支端到端 harness（104 項斷言）
 ```
 
+> **Agent 入口**：`AGENTS.md`（硬規則與文件路由）→ `docs/HANDOFF.md`（接手驗證）→
+> `docs/DESIGN.md` §11（陷阱）。線路契約查 `docs/CONTRACTS.md`；shim 已知落差查
+> `packages/shim/GAPS.md`。
+
 ---
 
 ## 目錄
@@ -229,7 +233,10 @@ packages/runtime/    7 個在 app.js 之前載入的模組：
                      platform-bridge、plugin-watch、popout、menu、print、notices、resilience
 tools/               11 支零依賴 CDP harness（驅動本機 Chrome，不需要 Playwright）
 scripts/             fetch-obsidian.mjs（零依賴 ASAR 解包）、start.mjs（啟動器 + doctor）
-docs/                DESIGN.md（決策與證據）、CONTRACTS.md（線路契約）、TODO.md
+docs/                DESIGN.md（決策與證據）、CONTRACTS.md（線路契約）、
+                     HANDOFF.md（接手驗證）、TODO.md（現況與待決策）
+packages/shim/GAPS.md  shim 的近似實作與已知落差
+.github/workflows/   CI：單元測試 + 語法檢查
 vendor/obsidian/     gitignore；由 scripts/fetch-obsidian.mjs 產生
 ```
 
@@ -275,7 +282,7 @@ done
 
 ## 延伸閱讀
 
-- **`docs/DESIGN.md`** — 19 項決策與其 shipped-artifact 證據，以及 14 個實作期間發現的陷阱。
+- **`docs/DESIGN.md`** — 19 項決策與其 shipped-artifact 證據，以及 17 個實作期間發現的陷阱。
   最有價值的幾條：
   - `policy: {}` 會讓**所有社群外掛靜默不載入**（§11.3）
   - 附件 URL 全部 404 的真正原因（§11.7）
@@ -284,6 +291,11 @@ done
   - `listAll()` 會弄壞檔案樹（§11.13）
   - 健康探測逾時會誤擋使用者存檔（§11.13.1）
   - `workspace.openLinkText()` 會種出 0 byte 筆記（§11.14）
+  - 良性 `ResizeObserver` 錯誤會開全螢幕 fatal（§11.15）
+  - harness 共用 vault 會交叉汙染（§11.16）
+  - Chrome 的 About 頁會搶走 about:blank popout（§11.17）
 - **`docs/CONTRACTS.md`** — server ↔ shim 的每一條線路契約，以及 client 端錯誤碼語意
-- **`docs/TODO.md`** — 尚未完成的事與已知風險
-- **`AGENTS.md`** — 改這個 repo 之前必須知道的 7 條硬規則
+- **`docs/HANDOFF.md`** — 下一個 agent 的接手指令、完整驗收流程與回報格式
+- **`docs/TODO.md`** — 尚未完成的事、待決策與已知風險
+- **`packages/shim/GAPS.md`** — shim 的近似實作與已知落差
+- **`AGENTS.md`** — 改這個 repo 之前必須知道的 7 條硬規則、文件路由與驗證門檻
