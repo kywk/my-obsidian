@@ -103,7 +103,7 @@ Server 在 HTML 中注入一段同步可用的 JSON，**必須早於任何 shim 
   成功後 `rename` 覆蓋目標（走 `resolved.real`，維持寫穿 symlink 的語意）。
   中斷或失敗一律刪 temp，舊檔內容不變、不留半檔。任何 content-type 都接受
   （不再受 Fastify 的 JSON parser 影響）；`bodyLimit` 在串流中以位元組計數強制，超過回 413 `ETOOBIG`。
-  `X-Write-Token` 在 rename 成功後才登記。實測 64 MiB 上傳峰值 +34 MiB `arrayBuffers`
+  `X-Write-Token` 在 rename 成功後才登記，並綁定串流內容雜湊與寫後 metadata（§4）。實測 64 MiB 上傳峰值 +34 MiB `arrayBuffers`
   （整包 buffered 會持有完整 64 MiB）。
 - `PUT` 可選帶 `X-Write-Token` 標頭，帶了就登記到與 `/api/fs`
   相同的 origin token 表，讓上傳者略過自己的回音事件。`GET`/`HEAD` 不登記（下載不是變更）。
@@ -132,18 +132,26 @@ Server → 客戶端：
 ] }
 ```
 
-- `originToken` 的語意是「**這條路徑最近由這個 token 寫過**」，不是「這個事件由這個 token 造成」。
-  瀏覽器**逐事件**略過 token 等於自己 session token 的事件。這是**逐事件**過濾而非整批略過：
-  伺服器把同一時間窗內所有寫入者的事件聚合成一個批次，整批略過會連外部編輯一起吃掉
-  （實測會讓外部變更永遠不 reconcile）。
-- token 在 **TTL（30 s）**內對該路徑的**每一個**事件都保留（不消費即刪除）；這是
-  「自己存檔 → 觸發重載 → plugin 又存檔」迴圈能收斂的唯一條件。代價是 TTL 內同路徑的
-  外部編輯也會被標成自己的（延後一次 reconcile，開檔時仍會回讀磁碟）。
-- 同一路徑被多個 token 寫過時**保留最後一個寫入者**（覆蓋，不合併）：事件只能帶一個 token，
-  且「磁碟現況來自誰的寫入」是唯一有用的答案；保留先寫者會讓後寫的分頁收到自己沒有 token
-  的事件而進入重載迴圈。殘留限制：兩個分頁對同一路徑互相 ping-pong 時彼此都像外部寫入者，
-  單 token 契約無法區分（見 `packages/shim/GAPS.md`）。
-- 註冊表上限 2000 筆路徑，超過時逐出**最久未寫入**者。
+- `originToken` 表示「**目前觀察到的磁碟版本符合此 token 的成功寫入**」。瀏覽器逐事件
+  略過等於自己 session token 的項目；同批、同路徑的其他事件仍各自判斷。
+- 一般檔案以預期內容的 SHA256 與成功寫入後的 inode、大小、mtime、ctime 等 metadata
+  比對；預期內容取自請求或寫入前的來源，不把任意寫後讀值當成自己的版本。
+  watcher 透過固定 descriptor 串流計算雜湊，確認讀取前後與路徑仍是同一版本。
+- `/api/fs` 修改與 PUT 最後的 rename 共用路徑佇列；watcher 等待該路徑的修改完成後取樣。
+  PUT 上傳過程不佔用佇列，雜湊在接收串流時計算，不把整個上傳載入記憶體；
+  排隊後、rename 前再次確認連線未中斷，中斷時清除 temp 並保留目的檔。
+- 寫穿 vault 內 symlink 時同時登記別名與實際目標；watcher 先走 vault 路徑檢查，
+  再對解析後的路徑取樣。開啟 descriptor 後、讀取內容前再次檢查 canonical 路徑與
+  descriptor 身分，以拒絕檢查後的祖先 symlink 替換。這是多步防護，並非核心層
+  原子目錄隔離；無法保證抵禦惡意本機程式持續、精準改換命名空間。
+- token **不消費即刪除**：同一版本跨批次的 create/change 仍帶 token，避免
+  「自己存檔 → 外掛重載 → 又存檔」迴圈。版本不符立即撤銷紀錄並送出未標記事件。
+  **TTL（30 s）只限制紀錄保存時間**，不再讓這段期間的同檔外部修改被一律略過。
+- 同一路徑只保留最後成功寫入的 token 與版本。成功但未帶 token 的修改清除舊紀錄；
+  失敗請求不登記新 token。刪除使用不存在的標記，目錄只比對本身 metadata，
+  遞迴修改不替所有後代登記 token。
+- 註冊表上限 2000 筆路徑，超過時逐出最久未寫入者；只有候選 token 路徑需要內容雜湊。
+  兩個分頁持續互改同檔仍各自收到對方事件；這不是多寫入者協作或衝突合併協定。
 - **事件不是 Node 的粒度**：同一路徑在同一個 150 ms 批次內會被去重（delete 優先）。
   依賴「先 create 再 change」兩個獨立事件的程式會看到合併後的單一事件。
 - 批次聚合視窗 150 ms。
@@ -185,7 +193,13 @@ window.require = (name) => window.__MYOBS_MODULES[name]
 `process` 同時要是 `window.process`（renderer 直接讀 `process.platform`）。
 
 不可用模組（明確拋錯並附 `code: "MODULE_NOT_SUPPORTED"`）：
-`child_process`、`net`、`worker_threads`。
+`net`、`worker_threads`。
+
+`child_process`／`node:child_process` 可匯入；exec／execFile／spawn／fork、同步版本、
+ChildProcess／_forkChild 一律在呼叫時同步拋相同錯誤碼，另附
+`moduleName: "child_process"`、`reason: "server-side-module"`、`operation`。
+不執行 callback、不產生子程序、不傳輸命令；promisify 包裝後得到 rejected Promise。
+通知只含操作名稱與能力限制，不含命令或環境變數。
 
 也可用（`node-globals-shim.js`）：`util`、`buffer`、`querystring`，以及全域 `Buffer`、
 `global`、`setImmediate`。
@@ -257,10 +271,19 @@ Electron 的 main 不會回覆，因此 runtime **不得**用 `ipcRenderer.on()`
 | `POST /api/plugins/uninstall` | body `{ id }`；移到 `.trash/plugins/<id>[-N]`，**不覆蓋**既有項目 |
 
 install 流程：GitHub API 取 release → 下載 `manifest.json`/`main.js`（`styles.css` 若有）
-→ 驗 manifest 可解析、`main.js` 非空、`digest` 相符 → **temp + rename 原子替換**
-（先備份舊目錄，交換失敗就還原）→ 保留 `data.json`。
+→ 驗 manifest 可解析、`main.js` 非空、`digest` 相符 → **temp + rename 替換**
+（先備份舊目錄，交換失敗就還原）→ 保留一般檔案形式的 `data.json`。
 `repo` 需符合 `^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`；解析後路徑不得逃出 plugins 目錄。
 **server 不自動啟用外掛、不改 `community-plugins.json`。**
+
+同一 Fastify instance 以 plugin id 序列化 install/uninstall 的磁碟修改；下載可並行，
+順序依完成下載後進入修改佇列決定，不保證 HTTP 抵達順序。不同 id 可獨立修改。
+兩次 rename 間仍有短暫的目錄空窗；此鎖不涵蓋官方 UI 的 `/api/fs`、外部同步工具或其他程序。
+
+| 錯誤 | 處理 |
+|---|---|
+| `409 EINVALID`：既有 `data.json` 為 symlink 或目錄 | 保留舊版，請先將設定資料整理為一般檔案後重試 |
+| `500 EROLLBACK`：新版發布與舊版復原都失敗 | 保留 `.obsidian/plugins/.myobs-backup-*`；錯誤訊息指出可復原位置，先復原再重試 |
 
 ---
 

@@ -3,7 +3,7 @@
 本檔案記錄 `packages/shim/src/**` 與 `packages/runtime/index.html` 中所有
 **近似實作 / 尚未實作 / 明知不正確** 的行為。
 
-最後同步：2026-10-23（baseline 修正：ResizeObserver fatal、harness 守門、dev mode；updater IPC 修正；popout 還原與平板門檻）。
+最後同步：2026-10-24（外掛 lifecycle、L2 模組、callback fs 與 Buffer 互通；驗收見 `docs/HANDOFF.md`）。
 
 維護規則（`AGENTS.md`）：遇到不確定的行為就寫在這裡，不要猜一個看起來合理的實作。
 每一條都要寫出：位置、目前行為、正確行為應該是什麼。
@@ -29,7 +29,7 @@
 | `electron-shim.js`（`sendSync`） | 未知頻道回 `undefined` 並在 console 警告一次。`frame → "native"`、`trash → false`、`update → ""`（無 installer；`disable-update → true`）都是策略選擇。About 頁仍會顯示沒有作用的「Check for updates」按鈕（renderer 的桌面 UI，未 patch）。 | 應逐一由 server 提供真實值；`trash` 的正確行為是作業系統垃圾桶（目前退回 vault 內 `.trash/`）。瀏覽器 runtime 沒有 installer，`update` 應維持桌面 main process 的預設空狀態，不可回 `"update-manual-required"`（會顯示假更新視窗，見 `DESIGN.md` §11.20）。 |
 | `electron-shim.js`（`request-url`） | 以 `fetch` 實作；`https://github.com` 等 allowlist 主機會被 `net-rewrite.js` 改寫成 `/api/proxy?url=…`（server 端 SSRF allowlist 是唯一強制點）。body 一律包成 `ArrayBuffer`。 | proxy 未做 DNS 解析後 IP 檢查（DNS rebinding）；`release-assets.githubusercontent.com` 不在 proxy allowlist（installer 例外允許）；未知長度的 body 超限時只能截斷連線。 |
 | `electron-shim.js`（`print-to-pdf`） | 由 `packages/runtime/print.js` 接管，改走瀏覽器列印；IPC 回 `{ ok:true, reason:"browser-print-dialog", printed:true, fileWritten:false }`。`filepath` 永遠不會被寫入；popout 的 `print-to-pdf` 沿 `host` 委派回宿主頁（上限 4 層）。 | 瀏覽器列印對話框是唯一落地點；Export modal 的 pageSize／landscape／margins 不套用（由瀏覽器列印分頁取代）。見 `DESIGN.md` §11.10。 |
-| `electron-shim.js`（選單） | `set-menu` / `update-menu-items` / `render-menu` 轉給 `runtime/menu.js`（自繪選單列＋`Menu.popup()` HTML fallback）；`context-menu` 回非 null 的 `editFlags`。 | 選單列缺 main-process 預設項目（About/Quit/undo/redo/cut/copy/paste/select all）；accelerator 只顯示不綁定；popout 沒有頂部 menubar。見 `DESIGN.md` §11.9。 |
+| `electron-shim.js`（選單） | `set-menu` / `update-menu-items` / `render-menu` 轉給 `runtime/menu.js`（自繪選單列＋`Menu.popup()` HTML fallback）；`context-menu` 回非 null 的 `editFlags`。子選單關閉已修父子引用循環、失效 child 與 hover timer 清理，以真 Kanban 移卡及多層選單驗收。 | 選單列缺 main-process 預設項目（About/Quit/undo/redo/cut/copy/paste/select all）；accelerator 只顯示不綁定；popout 沒有頂部 menubar。見 `DESIGN.md` §11.9。 |
 | `electron-shim.js` | `remote.app.getPath()` 是近似對應：`userData → <vault>/.obsidian/myobs-userdata`、`temp → /tmp`、`downloads` 等由 `documentsDir` 推導。 | Electron 回傳作業系統真實路徑；目前 tmp/home 等路徑不在 vault 內，經 fs shim 會得到 `ENOENT`。 |
 | `electron-shim.js`（`safeStorage`） | `isEncryptionAvailable()` 固定 `false`；`encrypt/decryptString` 只是 base64 來回。 | 應使用作業系統 keychain；目前 Obsidian 會走未加密分支。 |
 | `electron-shim.js`（`nativeTheme`） | `shouldUseDarkColors` 讀 `matchMedia`；`on/removeAllListeners` 是 no-op，所以系統主題變化不會通知 renderer。 | 應用 `matchMedia` 的 `change` 事件轉發 `"updated"`。 |
@@ -54,7 +54,7 @@
 | `fs-shim.js`（`watch`） | 委派 `window.__MYOBS_WATCH.watch()`（watch-shim）——**呼叫時**才判斷，因為 fs-shim 先載入；watch-shim 不存在時維持 no-op watcher。 | Node 的 `fs.watch` 在程序內直接產生事件；這裡的事件來自 server 的 `/api/watch`（單一來源、150ms 批次、`awaitWriteFinish` 300ms），延遲與粒度都不同。見 §3b。 |
 | `fs-shim.js`（`lstat` / symlink） | 直接轉呼 `stat`；server 的 `stat` 會 follow symlink，`isSymbolicLink()` 永遠 `false`。 | 需要 server 端 lstat op；目前 symlink 會被當成檔案/資料夾，且不會走 Obsidian 的 `reconcileSymbolicLinkCreation`。 |
 | `fs-shim.js`（`stat.realpath`） | 直接透傳 server `stat` 回的 `realpath`；目前 `packages/server/src/fs-api.js` 回的是**絕對、已解析 symlink** 路徑。adapter 不讀此欄位。 | Node 的 stat 沒有 `realpath` 欄位；契約 §2 對此描述模糊。外掛若要一致請改讀 `fs.promises.realpath()`。 |
-| `fs-shim.js`（`readFile`） | 未指定 encoding 時回 `Uint8Array`（不是 Node `Buffer`）。 | Node 回 `Buffer`；外掛若直接呼叫 `.toString("utf8")` 等方法會失敗，需傳 encoding。 |
+| `fs-shim.js`（`readFile`） | Promise 與 callback 的未指定 encoding 讀取回傳 shim `Buffer`，vault 與靜態資源一致。 | 支援 `.toString()`；Buffer 本身仍是子集，見 §6。 |
 | `fs-shim.js`（`writeFile`） | `ifMtimeMs` 仍只有呼叫端自己放在 options 才會轉發（Obsidian adapter 並不傳）；`token` 由傳輸層 `api()` 依 `TOKEN_OPS` 自動補上（見 §3b）。conflict copy 由 `fs-shim` 發 `fs:conflict:<path>` 通知，`notices.js` 顯示單卡，並可從卡片開啟保留的舊版本。 | `conflictSavedAs` 仍不會傳回 Obsidian adapter 的 UI，但使用者已可見；見 `DESIGN.md` §11.14。 |
 | `fs-shim.js`（`access`） | 忽略 mode（R_OK/W_OK/X_OK 都視為存在性檢查）。 | 需尊重 mode；唯讀資源也應區分 `EACCES`。 |
 | `fs-shim.js`（`mkdir`） | 一律走 server 的遞迴 mkdir；`recursive: false` 不生效。 | 非遞迴時 parent 不存在應丟 `ENOENT`。 |
@@ -66,7 +66,7 @@
 | `fs-shim.js`（路徑大小寫） | darwin/win32 對 vault/resources 前綴一律 case-insensitive 比對。 | 應以 `testInsensitive()` 的實際結果為準；case-sensitive APFS 可能誤把 `/Vault/...` 當成 vault 內。 |
 | `fs-shim.js`（resources） | `/obsidian/*` 只能 read/stat/access（HTTP GET/HEAD）；`existsSync` 一律 `false`，`readdir` 丟 `EPERM`，寫入丟 `EPERM`。 | Electron 的 `resourcesPath` 是磁碟路徑。這裡沒有「絕對磁碟路徑 → 靜態 URL」的映射，只接受 URL 前綴本身。若 renderer 用 `original-fs` 讀 `/Applications/Obsidian.app/...` 會得到 `ENOENT`。 |
 | `fs-shim.js`（resource `stat`） | 由 `Content-Length` / `Last-Modified` 拼出 stats；HEAD 405 時退回 GET。 | 與磁碟 stat 的 ino/mode/mtime 精度不同。 |
-| `fs-shim.js`（callback API） | 只提供 `promises.*`、`existsSync`、`exists` 與少數 sync；沒有 callback 版 `readFile/writeFile/...` 與 `readFileSync(vault)`。 | L2 外掛若使用 callback fs 會直接失敗。 |
+| `fs-shim.js`（callback API） | 已提供所有現有 promises 方法的 error-first callback 版本；`exists` 查實際磁碟、回單一 boolean，含標準 promisify hook。與 Promise 共用路徑限制、write token、offline gate。 | 沿用各方法既有 options 落差；`open/read/write/close` fd 介面、stream、`readFileSync(vault)` 仍未支援。callback 經 Promise microtask 排程，與 Node I/O phase 不完全相同。 |
 | `fs-shim.js`（缺的 promises） | 沒有 `opendir`、`readlink`、`symlink`、`link`、`chmod`、`chown`、`mkdtemp`、`cp`、`statfs`、`watch`。 | 完整 Node fs.promises 介面。 |
 | `fs-shim.js`（`constants`） | 只提供 `COPYFILE_*`、`O_*`、`S_IF*` 等基本常數。 | 完整 `fs.constants`。目前 adapter 只用到 `COPYFILE_EXCL`。 |
 | `fs-shim.js`（`realpath`） | vault 路徑回 `vaultRoot + 相對路徑` 的絕對字串；server 端 op 本身回相對路徑。 | Node 語意是解析 symlink 後的絕對路徑；目前不解析 symlink。 |
@@ -84,8 +84,8 @@
 |---|---|---|
 | `fs-shim.js`（`api()` 的 `TOKEN_OPS`） | 所有變更類 op（`write`/`writeBinary`/`append`/`appendBinary`/`mkdir`/`rmdir`/`remove`/`rename`/`copy`/`utimes`）在傳輸層自動補 `token: __MYOBS.sessionToken`，呼叫端不需知道。讀取類 op 不補。 | 契約 §2 的 `token` 本來就是給回音過濾用的；這一層是唯一能涵蓋所有呼叫端（adapter、外掛、`writeFileSync` 佇列）的位置。 |
 | `boot-data.js`（`sessionToken`） | 每個 document 一組 token（`crypto.randomUUID()`，退回 `getRandomValues` 十六進位，最後才用 `Math.random`）；**不覆蓋** server 已注入的值。 | 多分頁各自一組是正確的：**同一分頁**的寫入才會被自己過濾掉。分頁 A 的寫入在分頁 B 仍會派發（B 需要 reconcile）。 |
-| `watch-shim.js`（事件過濾） | 以**事件**為單位略過 `originToken === sessionToken` 者，並略過同批同路徑的兄弟事件。 | 一開始是「整批略過」，但 server 會把**所有寫入者**聚合成同一個 150ms 批次，整批略過連同批的外部編輯一起吃掉（`tools/hotreload-check.mjs` 的筆記測試就是這樣失敗的）。逐事件過濾同樣能阻斷迴圈，且不會犧牲外部變更。 |
-| `watch-shim.js`（token 覆蓋範圍） | **已修**：server 端改為 TTL（30 s）內對該路徑的每個事件都帶 token（`watch.js` 的 `createOriginTokenStore`），跨批次破口關閉。 | 殘留限制兩條：(1) 同一路徑被兩個分頁互相 ping-pong 時彼此都像外部寫入者，單 token 契約無法區分；(2) TTL 窗口內同路徑的**外部**編輯會被視為自己的而延後一次 reconcile。 |
+| `watch-shim.js`（事件過濾） | 逐事件略過 `originToken === sessionToken`；同批同路徑的其他事件各自判斷。 | 不以整批或路徑推測來源；否則外部修改、其他分頁事件會被連帶略過。VM 測試涵蓋兩種事件順序，真正 renderer 另驗外掛重載後存檔會收斂。 |
+| `watch-shim.js`（token 覆蓋範圍） | server 只對符合成功寫入版本的事件帶 token；檔案比較預期 SHA256 與 inode／size／mtime／ctime 等 metadata。同版本跨批次仍標記，版本不符立即撤銷。30 秒 TTL 僅限制紀錄保存。 | 不再漏掉 TTL 內同檔外部修改。仍非協作協定：兩個分頁互寫同檔會各自收到對方事件；目錄只標記本身，遞迴後代不逐一歸因；token 過期後不辨識極晚到達的回音。候選檔案需串流讀取雜湊，有額外 I/O。相對 symlink 跨目錄後若指向不同內容，不標 token；不把新目標任意認作原寫入。 |
 | `watch-shim.js`（事件粒度與順序） | 只保證第 N 批在 O(150ms)；同一路徑在同一批只會有一個事件（server 的 `pending` Map 去重，`delete` 優先），同一批內的多個路徑**沒有先後語意**。 | Node 的 `fs.watch` 依序回報每一次變更。依賴「先 create 再 change」的外掛會看到合併後的事件。 |
 | `watch-shim.js`（`error` 事件） | 永不派發 `error`。Node 的 FSWatcher 失效時會丟 `error`，adapter 收到後會 `onFileChange(realpath)` 全庫 rescan。這裡若在每次 WS 斷線都派發，會變成反覆全庫掃描。 | 需要「重連後補償」的策略（見下一列）。 |
 | `watch-shim.js`（重連） | 指數退避 1s → 上限 15s；`state.reconnects` 只在第二次以後的連線累加。**不重播**錯過的批次。斷線期間的外部變更若之後沒有再次變動，永遠不會傳到瀏覽器。 | 應在重連後對 `.obsidian/plugins/*` 與開檔中的檔案補一次 mtime 掃描，或由 server 保存最近 N 秒的事件重播。 |
@@ -93,9 +93,13 @@
 | `watch-shim.js`（目錄本身的事件） | `event.path === watcher.rel`（watched 目錄自己改變）時略過。 | Node 會回目錄的 basename，adapter 會把它當成「watcher 根下的項目」；略過可避免對 vault root 做無意義的 `reconcileFile("")`。 |
 | `plugin-watch.js`（路徑） | 只認 `.obsidian/plugins/<id>/{main.js,manifest.json,styles.css,data.json}`。自訂 config dir、plugin 子目錄、其他檔案（例如 plugin 自帶的 `.css`）不觸發。 | Obsidian 支援自訂 configDir；`DESIGN.md` §4 只列出這四種檔案。 |
 | `plugin-watch.js`（data.json 延後） | 設定頁開著時用 `document.querySelector(".mod-settings") !== null` 判斷，500ms 輪詢、30 秒後放棄並記錄 `deferred-abandoned`。 | 沒有公開 API 可查「目前開啟的 settings tab」；DOM class 是唯一可行訊號，Obsidian 改版可能失效。 |
-| `plugin-watch.js`（重載失敗） | `enablePlugin(id)` 回 `false`（例如 `policy.plugins` 不允許社群外掛）時，外掛會停在 unloaded，只有 `__MYOBS_PLUGIN_WATCH.events` 記錄失敗。 | 依 `DESIGN.md` §4 應該重載；失敗時應有 UI 提示。目前刻意不吞例外、完整記錄。 |
+| `plugin-watch.js`（重載失敗） | 觀察 `enablePlugin` 回傳值並記錄 `outcomes`；即使失敗實例仍存在也顯示通知，成功重載後清除。卸載後實例仍在時停止重載。 | 官方吞掉的 onload 原始例外仍需查看 console；之後的任意 timer／command 例外不屬於載入結果。 |
 | `plugin-watch.js`（開關） | `enabled` 預設 true，可由 `localStorage.getItem("myobs-plugin-watch") === "off"` 關閉（只在載入時讀一次）。`reloadAll()` 存在但尚無 UI。 | `DESIGN.md` §4 要求 UI 開關與手動「重新載入所有 plugin」；設定介面尚未實作。 |
-| `plugin-watch.js`（時序） | 重載鏈為 WS(≤150ms) → watch-shim → per-plugin debounce 400ms → unload/load。外部 `main.js` 變更到外掛重新 `onload` 約 1 秒。 | 桌面版是 OS 事件（毫秒級）。這是取樣與聚合的成本，屬可接受的近似。 |
+| `plugin-watch.js`（時序） | 重載鏈為 WS(≤150ms) → watch-shim → per-plugin debounce 400ms → 同 id 序列化 unload/load（執行中事件合併為尾隨重載）。外部 `main.js` 變更到外掛重新 `onload` 約 1 秒。 | 桌面版是 OS 事件（毫秒級）。這是取樣與聚合的成本，屬可接受的近似。 |
+
+版本雜湊在 descriptor 開啟後、讀取內容前重驗 canonical 路徑與檔案身分；
+涵蓋祖先 symlink 在 resolver／lstat／open 間被替換，以及開啟後還原的情況。
+此為多步檢查，不具核心層原子目錄隔離；惡意本機程式持續精準切換路徑仍屬邊界。
 
 ## 4. `path` / `os` / `url`
 
@@ -125,10 +129,20 @@
 
 | 位置 | 目前行為 | 正確行為 |
 |---|---|---|
-| `require-shim.js` | 提供 `electron`、`fs`、`original-fs`、`path`、`os`、`url`、`crypto`、`btime`、`process`，以及 `node-globals-shim.js` 註冊的 `util`、`buffer`、`querystring`；清單由 registry 推導。 | 已對齊 `DESIGN.md` §7；新增模組時改 registry 即可，錯誤訊息不會過時。 |
+| `require-shim.js` | 提供 `electron`、`fs`、`original-fs`、`path`、`os`、`url`、`crypto`、`btime`、`process`，以及 `node-globals-shim.js` 註冊的 `util`、`buffer`、`querystring`、`events`；清單由 registry 推導。 | 已對齊 `DESIGN.md` §7；新增模組時改 registry 即可，錯誤訊息不會過時。 |
 | `require-shim.js` | `obsidian`、`@codemirror/*`、`@lezer/*` 不在此 shim 內；預期由 Obsidian 的外掛載入器轉發。 | 若外掛直接呼叫 `window.require("obsidian")`，目前會丟 `MODULE_NOT_SUPPORTED`。 |
-| `require-shim.js` | 子路徑（`fs/promises`、`stream/web`）不支援。 | Node 支援子路徑；有外掛使用時需補。 |
-| `require-shim.js` | 錯誤有 `code = "MODULE_NOT_SUPPORTED"` 與 `moduleName`，但只在 console。 | `DESIGN.md` §7 要求 UI 提示「此 plugin 需要伺服器端執行權限，已被拒絕」；目前尚未接上。 |
+| `require-shim.js` | `require`／`resolve` 共用解析與拒絕規則；支援 `node:` 別名及 `fs/promises`、`path/posix`、`path/win32`。 | 其他子路徑（如 `stream/web`）仍不支援；不解析外掛本地 npm 套件或原生模組。 |
+| `require-shim.js` | 錯誤含 `MODULE_NOT_SUPPORTED`／`moduleName`；runtime 顯示外掛載入失敗通知，官方吞掉的原始例外仍在 console。 | 尚未將每個模組拒絕原因串接成 UI 能力診斷；不影響 `audit:plugins` 區分初始化成功／失敗。 |
+
+| `require-shim.js`（`child_process`） | bare／`node:` 可匯入凍結的 facade；exec、execFile、spawn、fork、同步版本、ChildProcess、_forkChild 都立即拒絕，包含 promisify。錯誤附 operation，UI 顯示可去停用的 shell／本機 AI 功能。 | 不提供任何程序執行或 ChildProcess 語意；沒有 server RPC，不回傳空成功值。尚未提供的子路徑仍於匯入時拒絕。 |
+
+### L2 子集邊界
+
+- `events`：同步 EventEmitter 支援 listener 順序、once/prepend/off、meta events、error 與 listener 查詢。`captureRejections:true` 明確拒絕；不含 static `once/on`、async iterator、EventTarget、AsyncResource。listener 過多以 console warning 回報。
+- `util.promisify`：使用 `Symbol.for("nodejs.util.promisify.custom")`，支援 custom hook、重複 promisify 與函式型別驗證；其他 util API 仍是近似實作。
+- `Buffer`：修正 UInt16／UInt32 的 LE／BE 讀取端序，以 Node 22 對照；仍非完整 Node Buffer（越界驗證、有號整數、浮點等介面未補齊）。
+- Templater 純 JavaScript user scripts 已以真模板驗收；依賴 shell、scrypt、其他未提供 Node API 的 scripts 仍無法執行。
+- 驗收與逐外掛盤點流程見 `docs/PLUGINS.md`。
 
 ## 7. `index.html` / 資產路徑
 

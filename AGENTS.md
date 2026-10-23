@@ -25,9 +25,9 @@ Node（Fastify）
 
 | 事實 | 值 |
 |---|---|
-| 功能 baseline | `b87612b`（2026-10-23，dev mode + 驗收基準修正） |
-| 單元測試 | **254/254** |
-| 端到端 harness | **11 支 / 109 項斷言**（`check:spike` 10 項） |
+| 功能 baseline | `31891ec`（2026-10-24，外掛支援與版本化回音修正） |
+| 單元測試 | **328/328** |
+| 端到端 harness | **20 支 / 229 項斷言**（`check:spike` 10 項） |
 | Node | 22；server 與 shim 都是 **plain JavaScript，無 build step** |
 | renderer | Obsidian 1.14.4，`app.js` 3,942,126 bytes，由 `npm run vendor` 產生 |
 | 目前不做 | 多使用者／登入、即時共編、多 vault、`child_process` L3 |
@@ -39,12 +39,12 @@ Node（Fastify）
 ```bash
 npm --prefix packages/server ci          # 1. 安裝 server 依賴
 npm run doctor -- --vault <vault-copy>  # 2. 環境檢查
-npm test                                # 3. 254/254
+npm test                                # 3. 328/328
 npm run dev -- --vault <vault-copy>     # 4. http://127.0.0.1:3000/（跳過同意畫面）
 ```
 
-**完成判準**：上述指令都成功、`npm test` 254/254、app 能 boot 且沒有全螢幕 fatal。
-完整 11 支 harness 與乾淨複本規則見 `docs/HANDOFF.md`〈驗證接手狀態〉。
+**完成判準**：上述指令都成功、`npm test` 328/328、app 能 boot 且沒有全螢幕 fatal。
+完整 20 支 harness 與乾淨複本規則見 `docs/HANDOFF.md`〈驗證接手狀態〉。
 
 > `--dev` 只允許 loopback；它從 `vendor/obsidian/app.js` 讀出字串注入 renderer，
 > 不寫 config、不輸出字串。正常模式請去掉 `--dev` 並完成同意畫面。
@@ -60,6 +60,7 @@ npm run dev -- --vault <vault-copy>     # 4. http://127.0.0.1:3000/（跳過同�
 | 改 server ↔ shim 的接縫、錯誤碼、header | `docs/CONTRACTS.md` |
 | 改 `fs` 語意或查 shim 已知落差 | `packages/shim/GAPS.md` |
 | 做設計決策、查歷史證據 | `docs/DESIGN.md`（**先讀 §11 陷阱**） |
+| 改外掛支援、查逐外掛相容性與盤點流程 | `docs/PLUGINS.md` |
 | 看還缺什麼、待決策、下一步 | `docs/TODO.md` |
 | 只想看人類版介紹 | `README.md` |
 
@@ -102,7 +103,7 @@ npm run dev -- --vault <vault-copy>     # 4. http://127.0.0.1:3000/（跳過同�
 | `packages/server/` | Fastify + WS：`/api/fs`、`/v/*`、`/api/watch`、`/api/proxy`、`/api/plugins`、consent、PWA |
 | `packages/shim/src/` | 13 個 classic script，取代 Electron／Node 依賴（含 `Buffer` 等全域） |
 | `packages/runtime/` | `index.html`、同意頁，以及 7 個在 `app.js` 前載入的模組 |
-| `tools/` | 11 支零依賴 CDP harness；`tools/lib/cdp.mjs` 是共用 driver 與 vault 守門 |
+| `tools/` | 20 支零依賴 CDP harness；`tools/lib/cdp.mjs` 是共用 driver 與 vault 守門 |
 | `scripts/` | `fetch-obsidian.mjs`（零依賴 ASAR 解包）、`start.mjs`（啟動器 + doctor） |
 | `docs/` | `DESIGN.md`、`CONTRACTS.md`、`HANDOFF.md`、`TODO.md` |
 | `packages/shim/GAPS.md` | shim 的近似實作與已知落差；改 fs 語意必更新 |
@@ -118,7 +119,7 @@ npm --prefix packages/server ci          # 第一次或 package-lock 變更後
 npm run doctor -- --vault <copy>         # 環境檢查
 npm run dev -- --vault <copy>            # 本地開發；loopback、跳過同意畫面
 npm start -- --vault <copy>              # 正常模式；第一次需完成同意畫面
-npm test                                 # 254 個單元測試
+npm test                                 # 328 個單元測試
 ```
 
 Harness（全部只對複本；先設 `MYOBS_LIVE_VAULT`）：
@@ -127,7 +128,7 @@ Harness（全部只對複本；先設 `MYOBS_LIVE_VAULT`）：
 export MYOBS_LIVE_VAULT=/path/to/real-vault
 npm run check:spike -- --vault <copy>    # 10 項
 npm run check:popout -- --vault <copy>   # 10 項
-# 其餘 9 支與「每支一份乾淨複本」的迴圈見 docs/HANDOFF.md
+# 其餘 18 支與「每支一份乾淨複本」的迴圈見 docs/HANDOFF.md
 ```
 
 ---
@@ -136,9 +137,9 @@ npm run check:popout -- --vault <copy>   # 10 項
 
 任何程式碼改動至少要通過：
 
-1. `npm test` **254/254** 全綠（測試只使用暫存目錄）
+1. `npm test` **328/328** 全綠（測試只使用暫存目錄）
 2. 若改動涉及 renderer boot、shim、runtime 或 server 接縫：`npm run check:spike` **10/10**
-3. 交付前跑**全部 11 支 harness**，每支回報 `passed: true`；`plugin-install` 需要真實網路
+3. 交付前跑**全部 20 支 harness**，每支回報 `passed: true`；`plugin-install` 需要真實網路
 4. 每支 harness 用一份**乾淨 vault 複本**；`MYOBS_LIVE_VAULT` 必須指向真實 vault
 5. 若改動涉及 fs 語意或 shim：更新 `packages/shim/GAPS.md`
 6. 若發現新陷阱：補進 `docs/DESIGN.md` §11，並同步 `docs/HANDOFF.md` / `docs/TODO.md`

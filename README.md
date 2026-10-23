@@ -6,7 +6,7 @@
 外面的 Electron／Node 依賴由 13 個 shim 取代。不是重寫的編輯器，也不是遠端桌面串流。
 
 ```
-Obsidian 1.14.4 · Node 22 · 254 個單元測試 · 11 支端到端 harness（109 項斷言）
+Obsidian 1.14.4 · Node 22 · 328 個單元測試 · 20 支端到端 harness（229 項斷言）
 ```
 
 > **Agent 入口**：`AGENTS.md`（硬規則與文件路由）→ `docs/HANDOFF.md`（接手驗證）→
@@ -167,7 +167,7 @@ npm run dev -- --vault ~/my-vault
 | 冷啟 | **≈ 510 ms** |
 | 全 vault 掃描 + metadata cache | ≈ 1 秒（19,000+ 次 fs 請求，0 失敗） |
 | 重連後 reconcile | ≈ 4.2 秒（10,036 檔） |
-| 社群外掛覆蓋率 | 16 個已啟用外掛載入 14 個 |
+| 社群外掛初始化（2026-10-24） | 15 個已啟用：15 成功、0 失敗；逐項見 `docs/PLUGINS.md` |
 
 ## 做不到什麼
 
@@ -175,13 +175,13 @@ npm run dev -- --vault ~/my-vault
 
 | 限制 | 原因 |
 |---|---|
-| 需要 `child_process` 的外掛（如 templater 的 user scripts） | 瀏覽器沒有伺服器端執行權限。這是刻意的邊界 |
+| 外掛的 shell／本機 AI CLI 功能 | `child_process` 可匯入，所有程序執行呼叫明確拒絕。Templater 純 JavaScript user scripts 可用，仍受 L2 API 範圍限制 |
 | 系統匣、全域快捷鍵、`obsidian://`、CLI、自動更新 | 瀏覽器沒有對應能力 |
 | Sync / Publish 登入 | 官方帳號機制，本專案不使用 |
 | 開機自動還原 popout 視窗 | 瀏覽器要求使用者手勢；會列出上次的視窗，讓你逐一點擊還原（一次一個） |
 | 儲存對話框的實際落地路徑 | 瀏覽器不揭露目錄；PDF 一律由列印對話框決定位置 |
 | 多人同時編輯 | 目前是單一寫入者模型 + conflict copy，未實作 OT/CRDT |
-| `onload` 在建構後才拋錯的外掛，不會出現在失敗通知裡 | 它仍留在 `app.plugins.plugins`，狀態差集看不到 |
+| 外掛的完整功能相容性 | 初始化成功不代表所有功能已驗收；以 `audit:plugins` 盤點後依情境回歸 |
 
 ---
 
@@ -231,7 +231,7 @@ packages/server/     Fastify + WS：/api/fs、/v/*、/api/watch、/api/proxy、/
 packages/shim/       13 個 classic script：取代 Electron／Node 依賴（含 Buffer 等全域）
 packages/runtime/    7 個在 app.js 之前載入的模組：
                      platform-bridge、plugin-watch、popout、menu、print、notices、resilience
-tools/               11 支零依賴 CDP harness（驅動本機 Chrome，不需要 Playwright）
+tools/               20 支零依賴 CDP harness（驅動本機 Chrome，不需要 Playwright）
 scripts/             fetch-obsidian.mjs（零依賴 ASAR 解包）、start.mjs（啟動器 + doctor）
 docs/                DESIGN.md（決策與證據）、CONTRACTS.md（線路契約）、
                      HANDOFF.md（接手驗證）、TODO.md（現況與待決策）
@@ -244,7 +244,7 @@ vendor/obsidian/     gitignore；由 scripts/fetch-obsidian.mjs 產生
 
 ```bash
 npm --prefix packages/server ci # 第一次或 package-lock 變更後
-npm test                        # 單元測試（254 項）
+npm test                        # 單元測試（328 項）
 
 npm run check:spike           # boot / 無 installer 更新對話框 / 完整載入（與磁碟可見檔案數相符）/ metadata cache / 文字與二進位往返 / 冷啟 / 良性錯誤不蓋畫面
 npm run check:hotreload       # WS、筆記外部變更、plugin 熱重載、回音過濾
@@ -257,7 +257,21 @@ npm run check:notices         # 通知層、conflict 單卡、外掛失敗
 npm run check:resilience      # 後端重啟、離線閘門、重連 reconcile
 npm run check:parity          # popout realm、popout 匯出、proxy、上傳
 npm run check:plugin-install  # 真實網路：Browse → Install → Enable
+npm run check:plugin-support  # 外掛初始化失敗、修復、序列重載、停用持久化（10 項）
+npm run check:templater       # 日期／JS 模板、檔案操作、JS user scripts、shell 拒絕
+npm run check:geo-story-map   # 地圖標記、故事切換、筆記索引、本機 AI 限制
+npm run check:vault-feed-reader # 訂閱、RSS、快取、已讀、Markdown、本機 AI 限制
+npm run check:kanban          # 卡片新增／編輯／移動／完成／刪除／封存與重載
+npm run check:dataview        # DQL／JS、原生查詢區塊、索引更新、checkbox 寫回
+npm run check:tasks           # 完成／取消、日期、每日重複任務、重載
+npm run check:quickadd        # Template／Capture Unicode 寫檔、保留內容、重載
+npm run check:origin-echo     # 同檔外改、跨批次回音、外掛重載後寫入收斂
+npm run audit:plugins         # 既有啟用外掛的逐項初始化盤點（須 --vault <copy>）
 ```
+
+七支具名外掛 harness 須在複本預先安裝 Templater 2.26.0、Geo Story Map 0.5.1、
+Vault Feed Reader 0.6.1、Kanban 2.0.51、Dataview 0.5.68、Tasks 8.6.0、QuickAdd 2.32.1。
+支援範圍與已知限制見 `docs/PLUGINS.md`。
 
 **全部只對 vault 複本執行**，不會碰你的真實 vault。harness 的守門是 fail-closed：
 必須設定 `MYOBS_LIVE_VAULT` 指向真實 vault，否則直接拒絕執行。
@@ -271,7 +285,7 @@ rsync -a --exclude='.git/' --exclude='.docusaurus/' --exclude='node_modules/' \
 
 # 每支 harness 一份乾淨複本：attachment 會留 fixture、menu/popout 會改
 # workspace-server.json，共用同一份會讓後面的 harness 繼承前一支的狀態。
-for name in spike hotreload attachment popout menu print dialog notices resilience parity plugin-install; do
+for name in spike hotreload attachment popout menu print dialog notices resilience parity plugin-install plugin-support templater geo-story-map vault-feed-reader kanban dataview tasks quickadd origin-echo; do
   DEST=$(mktemp -d)
   rsync -a "$BASE/" "$DEST/"
   npm run "check:$name" -- --vault "$DEST"
@@ -282,7 +296,7 @@ done
 
 ## 延伸閱讀
 
-- **`docs/DESIGN.md`** — 19 項決策與其 shipped-artifact 證據，以及 20 個實作期間發現的陷阱。
+- **`docs/DESIGN.md`** — 19 項決策與其 shipped-artifact 證據，以及 24 個實作期間發現的陷阱。
   最有價值的幾條：
   - `policy: {}` 會讓**所有社群外掛靜默不載入**（§11.3）
   - 附件 URL 全部 404 的真正原因（§11.7）
@@ -296,6 +310,7 @@ done
   - Chrome 的 About 頁會搶走 about:blank popout（§11.17）
 - **`docs/CONTRACTS.md`** — server ↔ shim 的每一條線路契約，以及 client 端錯誤碼語意
 - **`docs/HANDOFF.md`** — 下一個 agent 的接手指令、完整驗收流程與回報格式
+- **`docs/PLUGINS.md`** — 外掛支援範圍、逐外掛盤點與下一批驗收情境。
 - **`docs/TODO.md`** — 尚未完成的事、待決策與已知風險
 - **`packages/shim/GAPS.md`** — shim 的近似實作與已知落差
 - **`AGENTS.md`** — 改這個 repo 之前必須知道的 7 條硬規則、文件路由與驗證門檻

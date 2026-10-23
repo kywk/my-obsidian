@@ -161,16 +161,17 @@ Obsidian 的 `write()` 不是原子寫入（無 temp+rename），因此：
 | 模組 | 提供方式 |
 |---|---|
 | `obsidian`、`@codemirror/*`、`@lezer/*` | bundle 內建，直接轉發（bundle 內有 14 個） |
-| `path`、`os`、`util`、`url`、`crypto`、`buffer`、`querystring` | 瀏覽器 polyfill |
-| `fs` / `original-fs` | → `/api/fs`。讀取放行；**寫入需 `PLUGIN_FS_WRITE=1`** |
+| `path`、`os`、`util`、`url`、`crypto`、`buffer`、`querystring`、`events` | 瀏覽器 polyfill 子集，實際邊界見 `packages/shim/GAPS.md` |
+| `fs` / `original-fs` / `fs/promises` | → `/api/fs`，僅 vault 內讀寫；Promise 與 callback 共用路徑限制和離線閘門。原設計的 `PLUGIN_FS_WRITE` 開關未實作，不可當成保護機制 |
 | `electron` | partial：`remote.app.getVersion`、`shell.openExternal`→`window.open`、`clipboard` |
-| `child_process`、`net`、`worker_threads` | **明確拋錯** + UI 提示「此 plugin 需要伺服器端執行權限，已被拒絕」 |
+| `child_process` / `node:child_process` | 可匯入 refusal facade；exec／spawn 等全部同步拋 `MODULE_NOT_SUPPORTED`，附操作名稱與通知；沒有 server RPC |
+| `net`、`worker_threads` 等特權模組 | 匯入即明確拋錯，不提供伺服器執行權限 |
 
 ### 對照本人 vault（20 個已安裝 plugin）
 
 需要 Node／Electron 的只有 5 個：`kanban`(path, electron)、`auto-link-title`(electron)、
-`brat`(os)、`templater`(child_process, util)。白名單涵蓋前三個；**`templater` 的 user scripts
-是唯一明確不支援項**，留待 v2。
+`brat`(os)、`templater`(child_process, util)。這是初期盤點；2026-10-24 新盤點見 `PLUGINS.md`。
+Templater 純 JavaScript user scripts 已驗收；system commands 仍拒絕，不能將兩者混為一談。
 （另註：`symlinks-obsidian/` 已損壞 — `main.js` 0 bytes、無 manifest。）
 
 ---
@@ -350,7 +351,8 @@ binaryRoundTrip: false   →   加入 node-globals-shim.js 後   →   binaryRou
 
 對實測 vault 的 16 個已啟用 plugin：**載入 14 個**。
 唯二未載入的是 `vault-feed-reader` 與 `geo-story-map`，兩者都 `require("node:child_process")` ——
-這是 `DESIGN.md` §7 明定的 L2 邊界，不是缺陷。
+這是早期「匯入即拒絕」規則的結果；2026-10-24 已細分匯入與執行（§11.25）。
+舊盤點只計實例，還會漏掉 Templater 保留實例的 onload 失敗（§11.21）；新結果見 `PLUGINS.md`。
 
 ### 11.7 附件路徑 `/v/*` 的首次實測 —— 兩個原因疊在一起
 
@@ -592,7 +594,7 @@ listAll() { this.files = {}; return this.listRecursive(""); }   // ← 先清空
   （同 key 已存在則記 `conflict-delegated`）。
 - **boot 期外掛失敗用狀態差集偵測**（`enabledPlugins − plugins`），**不 patch `console.error`**
   —— 那太脆弱且會把除錯訊息變成 UI 噪音。
-  已知盲區：`onload` 在實例建立後才拋錯的外掛（如 `templater`）會留在 `plugins` 裡，差集看不到。
+  當時的盲區是 `onload` 失敗仍留實例；2026-10-24 已以 enablePlugin outcome observer 補齊（§11.21）。
 - **`workspace.openLinkText()` 不可用來開檔案**：連結目標尚未進入 vault index 時
   （conflict 副本只有約 1 秒大），它會 fall through 到 `fileManager.createNewFile()`，
   在 vault 裡種出 **0 byte 筆記** —— 按下「顯示保留的舊版本」反而製造垃圾檔。
@@ -693,3 +695,131 @@ facts 同時保留 `diskFileCount`、`fileCountAtBoot`、`fileCountAfterCacheWai
 > 教訓：shim 的 stub 不要借用「會改變 UI 狀態」的桌面值；選 main process 的預設值
 > （沒有副作用的那個），而不是選一個看起來「有處理」的狀態。
 
+
+### 11.21 外掛實例存在，不代表 onload 成功
+
+官方 1.14.4 在 await `instance.load()` 前就寫入 `plugins[id]`；`_loaded` 也早於
+`onload` 完成。`enablePlugin` 捕捉失敗後回 `false`，因此須觀察其結果，不能只計算
+`enabledPlugins − plugins`。runtime 在 app 與 plugin manager 建立時接入 observer，
+保留回傳結果與例外；成功重載會清除舊失敗。真正的首輪 boot 必須用 renderer 驗證，
+VM 模擬若預先建立 manager 會漏掉官方的非同步初始化時序。
+
+同 id 的外部事件與手動重載也必須共用佇列；debounce 無法防止慢 onload 期間的第二次 reload。
+執行中事件合併為一次尾隨重載，開始前重新檢查 watch 開關與設定頁。
+`disablePlugin(id, true)` 的 true 代表使用者停用（傳給 `_userDisabled`）；
+熱重載應用 `disablePlugin(id)`，enabled 集合僅由 `disablePluginAndSave` 修改。
+若官方吞掉 onunload 例外後仍留著實例，停止後續 enable 並通知使用者。
+
+### 11.22 L2 相容性要測資料語意
+
+Kanban 實際依賴 `fs/promises`；只提供 `fs.promises` 物件不足，require 也要解析子路徑。
+`require.resolve` 與 `require` 共用別名及拒絕規則，否則外掛的 feature detection 會失真。
+`fs.readFile` 未指定 encoding 必須回 Buffer；Uint8Array 的 `.toString()` 會回逗號數字，
+造成外掛解析失敗。原 Buffer UInt16／UInt32 LE/BE 讀取端序相反，僅測檔案位元組往返不足以辨識；
+測試以 Node 的已知值對照。callback fs 與 Promise 共用同一傳輸層，維持 vault 限制與離線拒寫。
+
+### 11.23 安裝替換與回滾需要共同序列化
+
+兩次 rename 不是完整交易；同 id 的 install/install 或 install/uninstall 可以踩到彼此的目錄。
+程式化端點以 id 排序磁碟修改，下載仍並行；不同 id 不互阻。此鎖不涵蓋 `/api/fs` 或外部程序。
+復原舊目錄失敗不能吞掉，須回 `EROLLBACK` 並留下備份位置。
+`data.json` 若非一般檔案應拒絕更新，不能略過複製後刪掉唯一資料。
+
+### 11.24 本機 watcher 上限會擋住 server 就緒
+
+2026-10-24 複本初始掃描碰到 `EMFILE`，server 等 `watcher.ready` 而未 listen，
+harness 只看到 readiness timeout。驗收改用 `CHOKIDAR_USEPOLLING=1`，複本排除網站產物 `build/`；
+真實 vault 未改動。polling 有額外掃描成本，應只在原生 watcher 額度不足時設定。
+server readiness 的錯誤傳播與 harness 啟動失敗清理仍列入 TODO。
+
+### 11.25 匯入子程序模組不等於需要執行 shell
+
+Templater 2.26.0 在建構時 require 並 promisify(exec)；Geo Story Map 0.5.1、
+Vault Feed Reader 0.6.1 在 bundle 頂層 require，真正呼叫只在可選的系統命令／本機 AI 功能。
+若 require 就拒絕，與 shell 無關的功能也無法初始化。
+
+`child_process` facade 因此只允許匯入；所有程序入口立即拋具名錯誤，不讀取命令或環境參數、
+不呼叫 callback、不回傳假的 ChildProcess 或成功輸出，也沒有 server 執行端點。
+一般呼叫與 util.promisify 的拒絕都要驗收；UI 通知失敗不得改變拒絕結果。
+Templater 用真模板驗證 system command 被拒絕且沒有磁碟副作用；Geo／Feed 用真外掛功能驗收，
+本機 AI 可能先被執行檔探測拒絕，不可把該錯誤宣稱為已測到 spawn。
+
+### 11.26 外掛初始化完成不代表筆記索引完成
+
+`boot-scan` 記錄的是外掛載入結果，不代表 metadata cache 或特定筆記已備妥。
+Templater 的 fileManager.renameFile 在索引前可能等待不結束；Geo 的 noteFolder 在目標筆記
+frontmatter 尚未可讀時會顯示 no slides。harness 必須等對應資料就緒，再驗功能。
+Geo 的 full 模式會刻意移除筆記標題，應驗完整內文，不以 h2 是否存在判定成敗。
+
+### 11.27 Feed Reader 的缺訂閱檔狀態不能用全域啟動延遲修補
+
+官方順序是 await plugins.initialize（逐個 await enablePlugin）→ vault.load →
+metadataCache.initialize → workspace.loadLayout。因此 enablePlugin 等待 metadata 會 deadlock。
+Feed Reader 0.6.1 在 onload 的 persistIdentities 以 getAbstractFileByPath 查父層，
+尚未索引時嘗試 createFolder；若資料夾磁碟已存在，adapter.exists 正確回 true 並拒絕建立，
+外掛因此切成唯讀。不是 fs.exists 的布林語意錯誤，不應吞掉 EEXIST 或提前重掃整個 vault。
+
+全新 root 可正常初始化；既有有效訂閱 YAML 可由初掃 create 事件觸發 reload 恢復。
+「root 已存在、訂閱 YAML 缺失」沒有該事件，須在索引後從原設定的 Subscriptions YAML 按 Apply。
+這條 UI 恢復路徑已實測，正式 harness 則使用全新 root，驗新建與既有訂閱重載兩條路徑。
+尚未在原生 Obsidian 重現，不把同 renderer 的靜態推論寫成桌面版實測。
+
+### 11.28 子選單關閉不能沿父子雙向引用遞迴
+
+Kanban 2.0.51 的 Move to list 在真 UI 觸發 RangeError：closePanel(child) 呼叫
+closeSubmenu(parentRow)，而 parentRow._myobsSubmenu 仍指向 child，形成無限遞迴。
+menu guard 以 console.warn 捕捉錯誤，沒有 fatal，卻使關閉後才執行的移卡動作永遠到不了。
+
+修正先切斷父列回指，再關閉子樹；移除父面板的失效 child 引用，取消所有列的 pending hover
+（包含已隱藏的列），避免關閉後再長出子選單。callback 保持 close hook → action 的順序。
+`check:menu` 用真 DOM 驗多層選取、ArrowLeft／Escape、切換兄弟選單與延遲 hover 清理；
+`check:kanban` 再驗真卡片移動與磁碟 Markdown。驗收須收 menu warning，不能只查未捕捉例外。
+
+### 11.29 功能驗收要等正確視圖與外掛索引
+
+Tasks query 與 Kanban 看板開啟須等 workspace.layoutReady，否則 boot 的 loadLayout 可能在後面覆寫測試分頁。
+Dataview 除 metadata cache 外還有自己的背景索引；只等 onload 不足。
+Obsidian 可能保留編輯與閱讀兩份 DOM，查詢與 checkbox 應限定目標 leaf 的
+.markdown-preview-view；Kanban 也只操作指定看板 view，不能全 document 計數。
+選單在 popout 可能屬於另一個 document；以 popup 回傳面板的 ownerDocument 操作，
+不要在主視窗搜尋實際顯示於子視窗的列。修改後等實際查詢結果，不以固定 sleep 當成功。
+
+QuickAdd 2.32.1 的 fixture 必須遵循原設定語意：legacy prepend:true 對應 Bottom of file，
+保留既有檔案使用 {kind:"apply",mode:"doNothing"}。錯誤設定會開互動 prompt，
+不能把 CDP 等待逾時當成宿主寫檔失敗。
+
+本機測試也要避開 fetch 的受限埠：server 4061 會讓 Chrome 使用 5061，/json/version
+請求被 Node fetch 以 bad port 拒絕，即使 Chrome 已啟動。使用 4051／5051 等允許的組合；
+啟動失敗仍須清理測試留下的程序，不能只等 readiness timeout。
+
+
+### 11.30 路徑的近期寫入者不能代表下一個事件的來源
+
+舊 registry 在 30 秒內替同路徑的每個事件附上最後寫入者 token。Dataview checkbox
+寫回 Alpha 後，外部再改 Alpha，磁碟已更新但索引與畫面停在舊值；重新載入才恢復。
+另有 browser 的同批同路徑推測，會連未標記事件與其他分頁事件一起略過。
+
+只縮短 TTL 或消費第一個 token 都不安全：一次寫入可能產生跨批次 create/change；
+外掛 onload 又寫 data.json 時，未標記的回音會造成無限重載。
+修正保留同版本跨批次標記，以預期內容 SHA256 加寫後 metadata 判斷磁碟版本。
+預期 hash 必須來自請求／來源；直接雜湊寫後讀回的內容，可能把搶先完成的外部寫入認作自己。
+讀取採固定 descriptor、前後 stat 與路徑檢查；版本不符撤銷紀錄。
+API 修改與 PUT commit 共用路徑佇列，watcher 等 commit 完成；串流上傳不長時間持鎖。
+瀏覽器只能依每個事件的 token 過濾，不能再以相同路徑擴大範圍。
+
+只對檔名使用 O_NOFOLLOW 不能擋住祖先目錄的 symlink；版本取樣須先經 vault
+resolver，寫穿 symlink 時則同時記錄別名與實際目標，避免自己的回音漏標。
+PUT 新增 commit 排隊後，也必須在出隊時重查連線；只在入隊前檢查會讓已中斷的
+上傳仍覆蓋目的檔。獨立探針驗證既有越界路徑不開啟 hash descriptor，以及中斷保留舊內容。
+
+提交前 review 再發現 resolver 完成後仍可替換祖先目錄：舊流程曾讀到 vault 外測試檔
+21 bytes。現在 open 後先比對原 lstat 與 fstat，重新驗 canonical containment，再比對
+路徑與 descriptor 身分，全部通過才讀內容；所有呼叫端強制傳 vault。三個測試涵蓋
+resolver→lstat、lstat→open 與開啟外部檔後還原祖先的 ABA 情境，修正後越界讀取為 0。
+這不是 openat/openat2 的原子目錄隔離，仍不把多步重驗宣稱為完整防禦惡意本機命名空間競態。
+
+`check:dataview` 加入 checkbox 後十秒內外改同檔，要求 API 與實際查詢畫面更新。
+`check:origin-echo` 用 onload 會 saveData 的測試外掛，驗跨批次自寫、外部 data/main
+更新、重新登記 token 後再外改，以及重載／寫入次數停止增加。單元測試另涵蓋
+等長內容並還原 mtime、無 token 與失敗請求、寫入競態；不同分頁事件由 shim 測試驗收。
+兩個 renderer 持續互寫同檔仍屬多寫入者問題，不能把單一 writer 的回音收斂宣稱為協作支援。

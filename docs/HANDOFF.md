@@ -18,14 +18,14 @@
 
 1. **`README.md`** —— 這個專案是什麼、怎麼跑、能做與不能做什麼、疑難排解。
 2. **`AGENTS.md`** —— 7 條硬規則、文件路由與驗證門檻。這是護欄，違反它的改動一律不接受。
-3. **`docs/DESIGN.md` §11** —— **20 個陷阱**。這是全 repo 最省時間的一份：
+3. **`docs/DESIGN.md` §11** —— **30 個陷阱**。這是全 repo 最省時間的一份：
    每一個都是花了好幾小時、用 shipped artifact 或實測挖出來的，
    不知道就會重踩（例如「附件 URL 全部 404 的真正原因」、「`listAll()` 會弄壞檔案樹」）。
 4. **`docs/TODO.md`** —— 現況表（哪個能力由哪支 harness 驗收）、需要決策的 4 件事、
    已知缺陷與風險。
 
 需要線路細節時再查 **`docs/CONTRACTS.md`**（server ↔ shim 的每一條契約與錯誤碼語意）。
-shim 的已知落差查 **`packages/shim/GAPS.md`**。
+shim 的已知落差查 **`packages/shim/GAPS.md`**。 外掛工作另讀 **`docs/PLUGINS.md`**（能力範圍與逐外掛驗收）。
 
 ---
 
@@ -33,24 +33,27 @@ shim 的已知落差查 **`packages/shim/GAPS.md`**。
 
 ```bash
 npm --prefix packages/server ci
-npm test                                  # 254/254
+npm test                                  # 328/328
 export MYOBS_LIVE_VAULT=/path/to/real-vault
 npm run check:spike -- --vault <copy>     # 10/10
 npm run dev -- --vault <copy>             # 另開終端；app 能 boot、沒有 fatal
 ```
 
-四項都成立才算拿到可用基準；完整 11 支見下一節。**不要先改 code 再回頭補驗證。**
+四項都成立才算拿到可用基準；完整 20 支見下一節。**不要先改 code 再回頭補驗證。**
 
 ---
 
-## 現況（2026-10-23 baseline 修正）
+## 現況（2026-10-24 外掛支援與同檔外部更新）
 
-- 功能 baseline：`b87612b`（dev mode + 驗收基準修正）；目前 HEAD 以 `git log -1` 為準
-- 76 個追蹤檔案（以 `git ls-files | wc -l` 為準）
+- 程式與驗收基準：`31891ec`；本輪自 `cb5d50e` 起分組提交，最新版本以 `git log -1` 為準
+- 程式、測試與驗收工具已納入版控；檔案清單以 `git ls-files` 為準，後續變更查 `git status --short`
 - Node 22；server 與 shim 都是 **plain JavaScript，沒有 build step**
-- 254 個單元測試 + **11 支零依賴 CDP harness**（109 項斷言；`check:spike` 10 項）
+- 328 個單元測試 + **20 支零依賴 CDP harness**（229 項斷言；`check:spike` 10 項）
 - renderer 是**未修改**的官方 Obsidian 1.14.4（`app.js` 3,942,126 bytes），
   由 `npm run vendor` 在操作者機器上解包，`vendor/` 不進版控
+- originToken 已綁定成功寫入版本；同檔外改不再被 30 秒 TTL 略過，跨批次回音仍能過濾（DESIGN §11.30）
+- Kanban 移卡的宿主子選單遞迴已修；四個外掛功能驗收見 `PLUGINS.md`
+- 三個原本失敗的外掛已初始化成功；Feed Reader 的缺訂閱檔冷啟限制與 Apply 恢復方式見 `PLUGINS.md`
 - CI 只跑單元測試與語法檢查；harness 需要本機 vault 複本、`vendor/` 與 Chrome
 - 本機開發可用 `npm run dev -- --vault <copy>`（或 `npm start -- --vault <copy> --dev`）：
   跳過同意畫面、只允許 loopback、從 `vendor/obsidian/app.js` 讀字串注入，不寫入 config
@@ -62,7 +65,7 @@ npm run dev -- --vault <copy>             # 另開終端；app 能 boot、沒有
 | 冷啟 | ≈ 510 ms |
 | 全 vault 掃描 + metadata cache | ≈ 1 秒（19,000+ 次 fs 請求，0 失敗） |
 | 重連後 reconcile | ≈ 4.2 秒（10,036 檔） |
-| 社群外掛覆蓋率 | 16 個已啟用載入 14 個 |
+| 社群外掛初始化 | 15 個啟用：15 成功、0 失敗、0 未觀測；見 `docs/PLUGINS.md` |
 
 ---
 
@@ -82,19 +85,29 @@ BASE=/tmp/vault-copy && mkdir -p "$BASE"
 rsync -a --exclude='.git/' --exclude='.docusaurus/' --exclude='node_modules/' \
   "$MYOBS_LIVE_VAULT/" "$BASE/"
 
-npm test                                  # 254/254
+npm test                                  # 328/328
 
 # 每支 harness 一份乾淨複本。attachment 會留 fixture；menu/popout 會改
 # workspace-server.json。共用一份會讓後面的 harness 繼承前一棒的狀態。
-for name in spike hotreload attachment popout menu print dialog notices resilience parity plugin-install; do
+for name in spike hotreload attachment popout menu print dialog notices resilience parity plugin-install plugin-support templater geo-story-map vault-feed-reader kanban dataview tasks quickadd origin-echo; do
   DEST=$(mktemp -d)
   rsync -a "$BASE/" "$DEST/"
   npm run "check:$name" -- --vault "$DEST"
 done
 ```
 
+若本機 watcher 出現 `EMFILE`，測試可設定 `CHOKIDAR_USEPOLLING=1`；
+本輪複本另排除網站產物 `build/`，真實 vault 未修改。
+
 **完成判準**：每一支都回報 `passed: true`（`plugin-install` 需要真實網路，離線時如實說明）。
 `check:spike` 現在是 10 項（新增無 installer 更新對話框的斷言）；
+`check:plugin-support` 提供 10 項外掛 lifecycle 驗收；三支真外掛 harness 分別為
+Templater 12 項、Geo Story Map 12 項、Vault Feed Reader 13 項。複本必須已安裝
+2.26.0／0.5.1／0.6.1 的對應原始外掛；未安裝或版本不符會明確拒絕。
+另有 Kanban 2.0.51／14 項、Dataview 0.5.68／17 項、Tasks 8.6.0／12 項、
+QuickAdd 2.32.1／14 項；`check:menu` 現為 11 項，包含子選單關閉回歸。
+`check:origin-echo` 13 項驗同檔外改、重載後存檔與跨批次回音收斂。
+`audit:plugins` 另行產生逐外掛盤點，不算 harness。
 其中檔案數是與「磁碟可見檔案數」對照，不要求 vault 大於 5,000 檔。
 任何一支失敗 → 先修到全綠，再談新功能。
 
