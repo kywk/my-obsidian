@@ -83,6 +83,28 @@
 		return error;
 	}
 
+	// These plugins import process helpers eagerly but only invoke them for
+	// optional shell/AI features. Importing is harmless; execution stays local
+	// to this refusal with no RPC or pretend ChildProcess/empty output.
+	var processFacade = Object.create(null);
+	["exec", "execFile", "execSync", "execFileSync", "spawn", "spawnSync", "fork", "ChildProcess", "_forkChild"].forEach(function (operation) {
+		processFacade[operation] = function () {
+			var error = serverSideNotSupported("child_process");
+			error.operation = operation;
+			error.message = "目前瀏覽器版本不支援執行外部程式（child_process." + operation +
+				"）。請停用外掛的 shell／本機 AI 功能，改用不需外部程式的操作。";
+			try {
+				var notices = window.__MYOBS_NOTICES;
+				if (notices && typeof notices.push === "function") {
+					notices.push({ level: "warn", source: "plugin", message: error.message,
+						dedupeKey: "capability:child_process:" + operation });
+				}
+			} catch (_) { /* A notification cannot change the refusal contract. */ }
+			throw error;
+		};
+	});
+	modules.child_process = Object.freeze(processFacade);
+
 	function builtinNotSupported(name) {
 		var error = new Error(
 			"Node.js built-in module '" + name + "' is not provided by the browser shim. " +
@@ -94,7 +116,17 @@
 		return error;
 	}
 
-	function requireModule(name) {
+	var SUBPATHS = {
+		"fs/promises": ["fs", "promises"],
+		"path/posix": ["path", "posix"],
+		"path/win32": ["path", "win32"]
+	};
+
+	function has(object, name) {
+		return Object.prototype.hasOwnProperty.call(object, name);
+	}
+
+	function lookup(name) {
 		if (typeof name !== "string" || name.length === 0) {
 			var typeError = new TypeError("module name must be a non-empty string");
 			typeError.code = "MODULE_NOT_SUPPORTED";
@@ -103,24 +135,35 @@
 
 		var normalized = name.slice(0, 5) === "node:" ? name.slice(5) : name;
 
-		if (Object.prototype.hasOwnProperty.call(modules, normalized)) {
+		if (has(modules, normalized)) {
 			return modules[normalized];
 		}
+		if (has(SUBPATHS, normalized)) {
+			var target = SUBPATHS[normalized];
+			if (has(modules, target[0]) && has(modules[target[0]], target[1])) {
+				return modules[target[0]][target[1]];
+			}
+		}
 
-		if (SERVER_SIDE[normalized]) {
+		var root = normalized.split("/")[0];
+		if (has(SERVER_SIDE, root)) {
 			throw serverSideNotSupported(name);
 		}
-		if (NODE_BUILTINS[normalized]) {
+		if (has(NODE_BUILTINS, root)) {
 			throw builtinNotSupported(name);
 		}
 		throw moduleNotFound(name);
 	}
 
+	function requireModule(name) {
+		return lookup(name);
+	}
+
 	requireModule.resolve = function (name) {
-		if (typeof name === "string" && Object.prototype.hasOwnProperty.call(modules, name)) {
-			return name;
-		}
-		throw moduleNotFound(name);
+		// Resolving a built-in must apply the same aliases and refusal as loading
+		// it; plugins commonly feature-detect with resolve before require.
+		lookup(name);
+		return name;
 	};
 
 	requireModule.cache = Object.create(null);

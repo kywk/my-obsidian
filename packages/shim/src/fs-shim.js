@@ -814,7 +814,7 @@
 			}
 			return response.arrayBuffer().then(function (buffer) {
 				var bytes = new Uint8Array(buffer);
-				return encoding ? decodeBytes(bytes, encoding) : bytes;
+				return encoding ? decodeBytes(bytes, encoding) : window.Buffer.from(bytes);
 			});
 		});
 	}
@@ -860,7 +860,7 @@
 					cacheSet(descriptor.rel, "file");
 					if (operation === "read") return result;
 					var bytes = base64ToBytes(result && result.base64);
-					return encoding ? decodeBytes(bytes, encoding) : bytes;
+					return encoding ? decodeBytes(bytes, encoding) : window.Buffer.from(bytes);
 				},
 				function (err) {
 					if (err && err.code === "ENOENT") cacheDrop(descriptor.rel);
@@ -1392,11 +1392,30 @@
 	}
 
 	function exists(path, callback) {
-		if (typeof callback === "function") {
-			queueMicrotask(function () {
-				callback(existsSync(path));
-			});
+		validateCallback(callback);
+		// Cache absence does not mean disk absence, especially on first load.
+		access(path).then(function () { callback(true); }, function () { callback(false); });
+	}
+
+	function validateCallback(callback) {
+		if (typeof callback !== "function") {
+			var error = new TypeError("The callback argument must be a function");
+			error.code = "ERR_INVALID_ARG_TYPE";
+			throw error;
 		}
+	}
+
+	function callbackMethod(method, returnsValue) {
+		return function () {
+			var args = Array.prototype.slice.call(arguments);
+			var callback = args.pop();
+			validateCallback(callback);
+			// Both API styles share confinement, write tokens and offline handling.
+			method.apply(null, args).then(function (value) {
+				if (returnsValue) callback(null, value);
+				else callback(null);
+			}, function (error) { callback(error); });
+		};
 	}
 
 	function makeWatcher() {
@@ -1453,6 +1472,18 @@
 		readFileSync: readFileSync,
 		watch: watch
 	};
+
+	var valueMethods = { readFile: true, stat: true, lstat: true, readdir: true, mkdir: true, realpath: true };
+	Object.keys(promises).forEach(function (name) {
+		if (typeof promises[name] === "function") {
+			fs[name] = callbackMethod(promises[name], valueMethods[name] === true);
+		}
+	});
+	if (typeof Symbol === "function" && Symbol.for) {
+		fs.exists[Symbol.for("nodejs.util.promisify.custom")] = function (path) {
+			return new Promise(function (resolve) { exists(path, resolve); });
+		};
+	}
 
 	modules["fs"] = fs;
 	modules["original-fs"] = fs;
