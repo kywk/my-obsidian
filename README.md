@@ -6,7 +6,7 @@
 外面的 Electron／Node 依賴由 13 個 shim 取代。不是重寫的編輯器，也不是遠端桌面串流。
 
 ```
-Obsidian 1.14.4 · Node 22 · 254 個單元測試 · 11 支端到端 harness（104 項斷言）
+Obsidian 1.14.4 · Node 22 · 254 個單元測試 · 11 支端到端 harness（105 項斷言）
 ```
 
 > **Agent 入口**：`AGENTS.md`（硬規則與文件路由）→ `docs/HANDOFF.md`（接手驗證）→
@@ -246,7 +246,7 @@ vendor/obsidian/     gitignore；由 scripts/fetch-obsidian.mjs 產生
 npm --prefix packages/server ci # 第一次或 package-lock 變更後
 npm test                        # 單元測試（254 項）
 
-npm run check:spike           # boot / 完整載入（與磁碟可見檔案數相符）/ metadata cache / 文字與二進位往返 / 冷啟 / 良性錯誤不蓋畫面
+npm run check:spike           # boot / 無 installer 更新對話框 / 完整載入（與磁碟可見檔案數相符）/ metadata cache / 文字與二進位往返 / 冷啟 / 良性錯誤不蓋畫面
 npm run check:hotreload       # WS、筆記外部變更、plugin 熱重載、回音過濾
 npm run check:attachment      # /v/*、Range、位元組一致、編碼檔名
 npm run check:popout          # 多視窗、同一 app 物件、獨立寫入
@@ -282,7 +282,7 @@ done
 
 ## 延伸閱讀
 
-- **`docs/DESIGN.md`** — 19 項決策與其 shipped-artifact 證據，以及 19 個實作期間發現的陷阱。
+- **`docs/DESIGN.md`** — 19 項決策與其 shipped-artifact 證據，以及 20 個實作期間發現的陷阱。
   最有價值的幾條：
   - `policy: {}` 會讓**所有社群外掛靜默不載入**（§11.3）
   - 附件 URL 全部 404 的真正原因（§11.7）

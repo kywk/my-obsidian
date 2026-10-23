@@ -3,7 +3,7 @@
 本檔案記錄 `packages/shim/src/**` 與 `packages/runtime/index.html` 中所有
 **近似實作 / 尚未實作 / 明知不正確** 的行為。
 
-最後同步：2026-10-23（baseline 修正：ResizeObserver fatal、harness 守門、dev mode）。
+最後同步：2026-10-23（baseline 修正：ResizeObserver fatal、harness 守門、dev mode；updater IPC 修正）。
 
 維護規則（`AGENTS.md`）：遇到不確定的行為就寫在這裡，不要猜一個看起來合理的實作。
 每一條都要寫出：位置、目前行為、正確行為應該是什麼。
@@ -26,7 +26,7 @@
 | `process-shim.js` | `versions.electron/node/chrome` 固定為 `35.0.0 / 22.0.0 / 128.0.0`。 | 應反映實際瀏覽器版本（`navigator.userAgent`）；依 chrome 版本分支的行為可能誤判。 |
 | `process-shim.js` | `env` 為空物件，`argv`/`pid`/`execPath` 為假值，`nextTick` 用 microtask。 | Node 的 nextTick queue 早於 promise microtask；實際順序會有些微差異。 |
 | `process-shim.js` | `on/once/removeListener/emit` 全部 no-op。 | 依賴 signal/exit 事件的外掛永遠不會收到事件。 |
-| `electron-shim.js`（`sendSync`） | 未知頻道回 `undefined` 並在 console 警告一次。`frame → "native"`、`trash → false`、`update → "update-manual-required"` 都是策略選擇。 | 應逐一由 server 提供真實值；`trash` 的正確行為是作業系統垃圾桶（目前退回 vault 內 `.trash/`）。 |
+| `electron-shim.js`（`sendSync`） | 未知頻道回 `undefined` 並在 console 警告一次。`frame → "native"`、`trash → false`、`update → ""`（無 installer；`disable-update → true`）都是策略選擇。About 頁仍會顯示沒有作用的「Check for updates」按鈕（renderer 的桌面 UI，未 patch）。 | 應逐一由 server 提供真實值；`trash` 的正確行為是作業系統垃圾桶（目前退回 vault 內 `.trash/`）。瀏覽器 runtime 沒有 installer，`update` 應維持桌面 main process 的預設空狀態，不可回 `"update-manual-required"`（會顯示假更新視窗，見 `DESIGN.md` §11.20）。 |
 | `electron-shim.js`（`request-url`） | 以 `fetch` 實作；`https://github.com` 等 allowlist 主機會被 `net-rewrite.js` 改寫成 `/api/proxy?url=…`（server 端 SSRF allowlist 是唯一強制點）。body 一律包成 `ArrayBuffer`。 | proxy 未做 DNS 解析後 IP 檢查（DNS rebinding）；`release-assets.githubusercontent.com` 不在 proxy allowlist（installer 例外允許）；未知長度的 body 超限時只能截斷連線。 |
 | `electron-shim.js`（`print-to-pdf`） | 由 `packages/runtime/print.js` 接管，改走瀏覽器列印；IPC 回 `{ ok:true, reason:"browser-print-dialog", printed:true, fileWritten:false }`。`filepath` 永遠不會被寫入；popout 的 `print-to-pdf` 沿 `host` 委派回宿主頁（上限 4 層）。 | 瀏覽器列印對話框是唯一落地點；Export modal 的 pageSize／landscape／margins 不套用（由瀏覽器列印分頁取代）。見 `DESIGN.md` §11.10。 |
 | `electron-shim.js`（選單） | `set-menu` / `update-menu-items` / `render-menu` 轉給 `runtime/menu.js`（自繪選單列＋`Menu.popup()` HTML fallback）；`context-menu` 回非 null 的 `editFlags`。 | 選單列缺 main-process 預設項目（About/Quit/undo/redo/cut/copy/paste/select all）；accelerator 只顯示不綁定；popout 沒有頂部 menubar。見 `DESIGN.md` §11.9。 |

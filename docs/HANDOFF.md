@@ -18,7 +18,7 @@
 
 1. **`README.md`** —— 這個專案是什麼、怎麼跑、能做與不能做什麼、疑難排解。
 2. **`AGENTS.md`** —— 7 條硬規則、文件路由與驗證門檻。這是護欄，違反它的改動一律不接受。
-3. **`docs/DESIGN.md` §11** —— **19 個陷阱**。這是全 repo 最省時間的一份：
+3. **`docs/DESIGN.md` §11** —— **20 個陷阱**。這是全 repo 最省時間的一份：
    每一個都是花了好幾小時、用 shipped artifact 或實測挖出來的，
    不知道就會重踩（例如「附件 URL 全部 404 的真正原因」、「`listAll()` 會弄壞檔案樹」）。
 4. **`docs/TODO.md`** —— 現況表（哪個能力由哪支 harness 驗收）、需要決策的 4 件事、
@@ -35,7 +35,7 @@ shim 的已知落差查 **`packages/shim/GAPS.md`**。
 npm --prefix packages/server ci
 npm test                                  # 254/254
 export MYOBS_LIVE_VAULT=/path/to/real-vault
-npm run check:spike -- --vault <copy>     # 9/9
+npm run check:spike -- --vault <copy>     # 10/10
 npm run dev -- --vault <copy>             # 另開終端；app 能 boot、沒有 fatal
 ```
 
@@ -48,7 +48,7 @@ npm run dev -- --vault <copy>             # 另開終端；app 能 boot、沒有
 - 功能 baseline：`b87612b`（dev mode + 驗收基準修正）；目前 HEAD 以 `git log -1` 為準
 - 76 個追蹤檔案（以 `git ls-files | wc -l` 為準）
 - Node 22；server 與 shim 都是 **plain JavaScript，沒有 build step**
-- 254 個單元測試 + **11 支零依賴 CDP harness**（104 項斷言；`check:spike` 9 項）
+- 254 個單元測試 + **11 支零依賴 CDP harness**（105 項斷言；`check:spike` 10 項）
 - renderer 是**未修改**的官方 Obsidian 1.14.4（`app.js` 3,942,126 bytes），
   由 `npm run vendor` 在操作者機器上解包，`vendor/` 不進版控
 - CI 只跑單元測試與語法檢查；harness 需要本機 vault 複本、`vendor/` 與 Chrome
@@ -94,7 +94,7 @@ done
 ```
 
 **完成判準**：每一支都回報 `passed: true`（`plugin-install` 需要真實網路，離線時如實說明）。
-`check:spike` 現在是 9 項（新增良性 `ResizeObserver` 錯誤不得開 fatal 的斷言）；
+`check:spike` 現在是 10 項（新增無 installer 更新對話框的斷言）；
 其中檔案數是與「磁碟可見檔案數」對照，不要求 vault 大於 5,000 檔。
 任何一支失敗 → 先修到全綠，再談新功能。
 

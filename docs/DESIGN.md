@@ -18,7 +18,7 @@
 | `/api/fs` 與 `/v/*` 契約 | §5、`CONTRACTS.md` |
 | terms 閘與 dev mode | §8 |
 | 測試層次與 harness | §9 |
-| 實作期間的 19 個陷阱 | **§11** |
+| 實作期間的 20 個陷阱 | **§11** |
 
 ---
 
@@ -221,7 +221,7 @@ server config，再由此注入（契約欄位為 `termsText`，見 `CONTRACTS.m
 | 層 | 指令 | 項目數 | 涵蓋 |
 |---|---|---|---|
 | 單元 | `cd packages/server && npm test` | 254 | fs API、conflict、auth、consent、files/`/v/*`、watch token、proxy（含 DNS 硬化）、plugins、static、PUT 串流 |
-| 1 | `node tools/spike-check.mjs --vault <複本>` | 9 | boot、完整載入（檔案數與磁碟可見數相符）、metadata cache、文字往返、二進位往返、冷啟、workspace 隔離、零例外、良性錯誤不蓋畫面 |
+| 1 | `node tools/spike-check.mjs --vault <複本>` | 10 | boot、無 installer 更新對話框、完整載入（檔案數與磁碟可見數相符）、metadata cache、文字往返、二進位往返、冷啟、workspace 隔離、零例外、良性錯誤不蓋畫面 |
 | 2 | `node tools/hotreload-check.mjs` | 4 | WS 連線、筆記外部變更、plugin 熱重載、回音過濾 |
 | 3 | `node tools/attachment-check.mjs` | 全部 | `/v/*` URL 形狀、位元組一致、瀏覽器實際解碼、Range、pdfjs、編碼檔名 |
 | 4 | `node tools/popout-check.mjs` | 8 | popout 開啟、同一 app 物件、指定筆記、獨立寫入、真實鍵盤輸入、deep link |
@@ -669,4 +669,17 @@ facts 同時保留 `diskFileCount`、`fileCountAtBoot`、`fileCountAfterCacheWai
 
 > 教訓：對 Obsidian workspace 的斷言要等「狀態成立」，不要等「大概夠久」。
 > 固定 sleep 在快機器上透過、在冷 cache 上失敗，是最難重現的那種 flaky。
+
+### 11.20 `update` IPC 回傳桌面版的 installer 狀態會跳出假更新視窗
+
+桌面版 main process 的 `update` 預設是空字串，只有 updater 真的判定需要重裝 installer 時
+才設 `"update-manual-required"`。shim 原本無條件回這個值，於是 Obsidian 在 boot 後
+（以及每小時的 interval）顯示「Update Available / manually download and reinstall Obsidian」。
+瀏覽器 runtime 根本沒有 installer，這個視窗對使用者是純噪音，也會讓人以為服務壞了。
+
+修正：`update` 回 `""`，並補上 `disable-update → true`；後者同時關掉 boot 時的
+`ex(hw, moe)` 版本分支與 About 頁的 updater 開關，讓兩條路徑都不會再提示更新。
+
+> 教訓：shim 的 stub 不要借用「會改變 UI 狀態」的桌面值；選 main process 的預設值
+> （沒有副作用的那個），而不是選一個看起來「有處理」的狀態。
 

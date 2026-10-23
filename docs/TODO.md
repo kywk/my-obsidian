@@ -22,7 +22,7 @@
 
 | 能力 | 狀態 | 驗收 |
 |---|---|---|
-| 官方 renderer boot（1.14.4） | `[x]` | `check:spike` 9/9 |
+| 官方 renderer boot（1.14.4） | `[x]` | `check:spike` 10/10 |
 | 編輯／檔案樹／搜尋／圖譜／Canvas／命令面板 | `[x]` | 官方實作，隨 renderer 提供 |
 | 社群外掛載入（L2） | `[x]` | 16 個已啟用載入 14 個（另 2 個需 `child_process`） |
 | 社群外掛安裝／更新／卸載 | `[x]` | `check:plugin-install` 6/6（真實網路） |

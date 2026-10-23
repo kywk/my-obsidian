@@ -304,7 +304,17 @@
 			return "native";
 		},
 		update: function () {
-			return "update-manual-required";
+			// The desktop main process starts with "" and only changes this
+			// after its updater actually finds a required installer update.
+			// This runtime has no installer, so "update-manual-required" made
+			// Obsidian show its desktop-only "Update Available / reinstall"
+			// dialog on every boot.
+			return "";
+		},
+		"disable-update": function () {
+			// No updater exists here. Report updates as disabled so the About
+			// toggle and the boot-time version check agree with reality.
+			return true;
 		},
 		"check-update": function () {
 			return false;

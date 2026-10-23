@@ -195,6 +195,23 @@ async function main() {
     report.criteria.appExists = appReady;
     if (!appReady) throw new Error('window.app never appeared');
 
+    // 1b. updater state. There is no Electron installer in this runtime;
+    // "update-manual-required" made the renderer show the desktop-only
+    // "Update Available / reinstall" dialog on every boot.
+    const updater = await evaluate(`(function () {
+      try {
+        return {
+          state: electron.ipcRenderer.sendSync("update"),
+          disabled: electron.ipcRenderer.sendSync("disable-update"),
+        };
+      } catch (err) {
+        return { error: String(err && err.message || err) };
+      }
+    })()`).catch((err) => ({ error: String(err && err.message || err) }));
+    report.facts.updater = updater;
+    report.criteria.noInstallerUpdate =
+      !!updater && updater.state === "" && updater.disabled === true;
+
     // 2. vault file count. The boot-time value can be 0/partial because the
     // scan is still running; the authoritative comparison happens after the
     // metadata cache is ready.
