@@ -735,6 +735,159 @@ describe('POST /api/plugins/install', () => {
     );
   });
 
+  it('serializes concurrent updates of the same plugin and retains its settings', async () => {
+    setRelease('concurrent');
+    await writeFile(vault, '.obsidian/plugins/concurrent/main.js', 'old');
+    await writeFile(vault, '.obsidian/plugins/concurrent/data.json', '{"saved":42}');
+
+    const responses = await Promise.all(
+      Array.from({ length: 12 }, () => install({ repo: 'owner/obsidian-demo' })),
+    );
+    for (const response of responses) assert.equal(response.statusCode, 200, response.body);
+    assert.equal(
+      await fs.promises.readFile(path.join(vault, '.obsidian/plugins/concurrent/data.json'), 'utf8'),
+      '{"saved":42}',
+    );
+    assert.equal(
+      await fs.promises.readFile(path.join(vault, '.obsidian/plugins/concurrent/main.js'), 'utf8'),
+      'console.log("demo");\n',
+    );
+    const entries = await fs.promises.readdir(path.join(vault, '.obsidian/plugins'));
+    assert.deepEqual(entries.filter((name) => name.startsWith('.myobs-')), []);
+  });
+
+  it('waits for a pending publication before uninstalling the same plugin', async (t) => {
+    setRelease('install-uninstall');
+    const target = path.join(await fs.promises.realpath(vault), '.obsidian/plugins/install-uninstall');
+    await writeFile(vault, '.obsidian/plugins/install-uninstall/main.js', 'old');
+    await writeFile(vault, '.obsidian/plugins/install-uninstall/data.json', '{"saved":true}');
+    const paused = Promise.withResolvers();
+    const resume = Promise.withResolvers();
+    const rename = fs.promises.rename;
+    t.mock.method(fs.promises, 'rename', async (source, destination) => {
+      if (path.basename(source).startsWith('.myobs-tmp-') && destination === target) {
+        paused.resolve();
+        await resume.promise;
+      }
+      return rename(source, destination);
+    });
+    const installing = install({ repo: 'owner/obsidian-demo' }).then((response) => response);
+    await paused.promise;
+    const uninstalling = app.inject({
+      method: 'POST', url: '/api/plugins/uninstall', payload: { id: 'install-uninstall' },
+    }).then((response) => response);
+    try {
+      // Keep the target absent long enough for an unprotected uninstall to
+      // return ENOENT. A protected request remains queued until publication.
+      const early = await Promise.race([
+        uninstalling,
+        new Promise((resolve) => setTimeout(() => resolve(null), 50)),
+      ]);
+      assert.equal(early, null, early?.body);
+      await writeFile(vault, '.obsidian/plugins/unrelated/main.js', 'independent plugin');
+      const unrelated = await app.inject({
+        method: 'POST', url: '/api/plugins/uninstall', payload: { id: 'unrelated' },
+      });
+      assert.equal(unrelated.statusCode, 200, unrelated.body);
+    } finally {
+      resume.resolve();
+      await Promise.all([installing, uninstalling]);
+    }
+    const installed = await installing;
+    const uninstalled = await uninstalling;
+    assert.equal(installed.statusCode, 200, installed.body);
+    assert.equal(uninstalled.statusCode, 200, uninstalled.body);
+    await assert.rejects(fs.promises.access(target), /ENOENT/);
+    assert.equal(
+      await fs.promises.readFile(path.join(vault, uninstalled.json().trashedTo, 'data.json'), 'utf8'),
+      '{"saved":true}',
+    );
+  });
+
+  it('restores the old version after publication fails and permits a later retry', async (t) => {
+    setRelease('rollback');
+    await writeFile(vault, '.obsidian/plugins/rollback/main.js', 'old version');
+    await writeFile(vault, '.obsidian/plugins/rollback/data.json', '{"saved":true}');
+    const rename = fs.promises.rename;
+    const mocked = t.mock.method(fs.promises, 'rename', async (source, destination) => {
+      if (path.basename(source).startsWith('.myobs-tmp-')) {
+        throw Object.assign(new Error('injected publication failure'), { code: 'EIO' });
+      }
+      return rename(source, destination);
+    });
+    const failed = await install({ repo: 'owner/obsidian-demo' });
+    assert.equal(failed.statusCode, 500, failed.body);
+    assert.equal(failed.json().error.code, 'EIO');
+    assert.equal(
+      await fs.promises.readFile(path.join(vault, '.obsidian/plugins/rollback/main.js'), 'utf8'),
+      'old version',
+    );
+    assert.equal(
+      await fs.promises.readFile(path.join(vault, '.obsidian/plugins/rollback/data.json'), 'utf8'),
+      '{"saved":true}',
+    );
+    mocked.mock.restore();
+    const retry = await install({ repo: 'owner/obsidian-demo' });
+    assert.equal(retry.statusCode, 200, retry.body);
+    const entries = await fs.promises.readdir(path.join(vault, '.obsidian/plugins'));
+    assert.deepEqual(entries.filter((name) => name.startsWith('.myobs-')), []);
+  });
+
+  it('keeps and identifies the backup when publication and restoration both fail', async (t) => {
+    setRelease('recoverable');
+    await writeFile(vault, '.obsidian/plugins/recoverable/main.js', 'recover this version');
+    await writeFile(vault, '.obsidian/plugins/recoverable/data.json', '{"saved":true}');
+    const rename = fs.promises.rename;
+    t.mock.method(fs.promises, 'rename', async (source, destination) => {
+      if (path.basename(source).startsWith('.myobs-')) {
+        throw Object.assign(new Error('injected rename failure'), { code: 'EIO' });
+      }
+      return rename(source, destination);
+    });
+    const response = await install({ repo: 'owner/obsidian-demo' });
+    assert.equal(response.statusCode, 500, response.body);
+    assert.equal(response.json().error.code, 'EROLLBACK');
+    const entries = await fs.promises.readdir(path.join(vault, '.obsidian/plugins'));
+    const backups = entries.filter((name) => name.startsWith('.myobs-backup-'));
+    assert.equal(backups.length, 1);
+    assert.ok(response.json().error.message.includes(`.obsidian/plugins/${backups[0]}`));
+    assert.equal(entries.some((name) => name.startsWith('.myobs-tmp-')), false);
+    assert.equal(
+      await fs.promises.readFile(path.join(vault, '.obsidian/plugins', backups[0], 'main.js'), 'utf8'),
+      'recover this version',
+    );
+    assert.equal(
+      await fs.promises.readFile(path.join(vault, '.obsidian/plugins', backups[0], 'data.json'), 'utf8'),
+      '{"saved":true}',
+    );
+  });
+
+  it('rejects non-regular settings without removing user data', async () => {
+    for (const kind of ['directory', 'symlink']) {
+      const id = `settings-${kind}`;
+      setRelease(id);
+      await writeFile(vault, `.obsidian/plugins/${id}/main.js`, 'old version');
+      const dataPath = path.join(vault, `.obsidian/plugins/${id}/data.json`);
+      if (kind === 'directory') {
+        await writeFile(vault, `.obsidian/plugins/${id}/data.json/keep.txt`, 'user data');
+      } else {
+        await writeFile(vault, 'shared-settings.json', 'user data');
+        await fs.promises.symlink('../../../shared-settings.json', dataPath);
+      }
+      const response = await install({ repo: 'owner/obsidian-demo' });
+      assert.equal(response.statusCode, 409, response.body);
+      assert.equal(response.json().error.code, 'EINVALID');
+      assert.equal(
+        await fs.promises.readFile(path.join(vault, `.obsidian/plugins/${id}/main.js`), 'utf8'),
+        'old version',
+      );
+      assert.equal(
+        await fs.promises.readFile(kind === 'directory' ? path.join(dataPath, 'keep.txt') : dataPath, 'utf8'),
+        'user data',
+      );
+    }
+  });
+
   it('accepts a JSON body sent as form-urlencoded (curl -d default)', async () => {
     setRelease('form-demo');
     const response = await app.inject({
@@ -926,5 +1079,23 @@ describe('POST /api/plugins/uninstall', () => {
     const response = await uninstall({ id: 'not-installed' });
     assert.equal(response.statusCode, 404, response.body);
     assert.equal(response.json().error.code, 'ENOENT');
+  });
+
+  it('serializes concurrent uninstalls without overwriting the recoverable copy', async () => {
+    await writeFile(vault, '.obsidian/plugins/concurrent-remove/data.json', '{"saved":true}');
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, () => uninstall({ id: 'concurrent-remove' })),
+    );
+    assert.equal(responses.filter((response) => response.statusCode === 200).length, 1);
+    for (const response of responses) {
+      assert.ok([200, 404].includes(response.statusCode), response.body);
+      if (response.statusCode === 404) assert.equal(response.json().error.code, 'ENOENT');
+    }
+    assert.equal(
+      await fs.promises.readFile(path.join(vault, '.trash/plugins/concurrent-remove/data.json'), 'utf8'),
+      '{"saved":true}',
+    );
+    const entries = await fs.promises.readdir(path.join(vault, '.trash/plugins'));
+    assert.deepEqual(entries.filter((name) => name.startsWith('concurrent-remove')), ['concurrent-remove']);
   });
 });

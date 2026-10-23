@@ -482,13 +482,18 @@ async function atomicInstall(pluginsReal, id, files) {
         const dataFile = path.join(target, 'data.json');
         try {
           const dataStat = await fs.promises.lstat(dataFile);
-          if (dataStat.isFile()) {
-            await fs.promises.copyFile(
-              dataFile,
-              path.join(temp, 'data.json'),
-              fs.constants.COPYFILE_EXCL,
+          if (!dataStat.isFile()) {
+            throw new PluginError(
+              409,
+              'EINVALID',
+              `plugin "${id}" data.json is not a regular file; preserve its contents as a regular file before updating`,
             );
           }
+          await fs.promises.copyFile(
+            dataFile,
+            path.join(temp, 'data.json'),
+            fs.constants.COPYFILE_EXCL,
+          );
         } catch (err) {
           if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') throw err;
         }
@@ -503,9 +508,16 @@ async function atomicInstall(pluginsReal, id, files) {
       await fs.promises.rename(temp, target);
     } catch (err) {
       if (movedAside) {
-        await fs.promises.rename(backup, target).catch(() => {
-          // Nothing better to do; the error below names the failed operation.
-        });
+        try {
+          await fs.promises.rename(backup, target);
+        } catch {
+          // Never delete the only remaining copy when restoration itself fails.
+          throw new PluginError(
+            500,
+            'EROLLBACK',
+            `plugin "${id}" update and restoration failed; recover the previous version from .obsidian/plugins/${path.basename(backup)} before retrying`,
+          );
+        }
       }
       throw err;
     }
@@ -540,6 +552,28 @@ export function registerPluginRoutes(app, options) {
   const token = options.githubToken ?? process.env.GITHUB_TOKEN ?? undefined;
   const fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
   const allowInsecureDownload = options.allowInsecureDownload === true;
+  /** @type {Map<string, Promise<unknown>>} */
+  const mutations = new Map();
+
+  /**
+   * Downloads remain independent; only API mutations of the same plugin must
+   * wait, so an uninstall cannot remove an install's backup or replacement.
+   * This does not lock renderer /api/fs writes or other filesystem processes.
+   * @template T
+   * @param {string} id
+   * @param {() => Promise<T>} mutate
+   * @returns {Promise<T>}
+   */
+  async function withPluginMutation(id, mutate) {
+    const previous = mutations.get(id) ?? Promise.resolve();
+    const current = previous.catch(() => {}).then(mutate);
+    mutations.set(id, current);
+    try {
+      return await current;
+    } finally {
+      if (mutations.get(id) === current) mutations.delete(id);
+    }
+  }
 
   /**
    * @param {string} url
@@ -710,14 +744,16 @@ export function registerPluginRoutes(app, options) {
         written.push('styles.css');
       }
 
-      const pluginsDir = await resolveVaultPath(vault, '.obsidian/plugins');
-      await fs.promises.mkdir(pluginsDir.real, { recursive: true });
-      const pluginsReal = await fs.promises.realpath(pluginsDir.real);
-      if (!isInside(vault.root, pluginsReal)) {
-        throw new PluginError(403, 'EPERM', 'plugins directory escapes the vault');
-      }
+      await withPluginMutation(id, async () => {
+        const pluginsDir = await resolveVaultPath(vault, '.obsidian/plugins');
+        await fs.promises.mkdir(pluginsDir.real, { recursive: true });
+        const pluginsReal = await fs.promises.realpath(pluginsDir.real);
+        if (!isInside(vault.root, pluginsReal)) {
+          throw new PluginError(403, 'EPERM', 'plugins directory escapes the vault');
+        }
 
-      await atomicInstall(pluginsReal, id, files);
+        await atomicInstall(pluginsReal, id, files);
+      });
 
       return reply.send({
         ok: true,
@@ -735,49 +771,51 @@ export function registerPluginRoutes(app, options) {
       const body = readJsonBody(request);
       const id = validatePluginId(body.id);
 
-      const source = await resolveVaultPath(vault, `.obsidian/plugins/${id}`);
-      let stat;
-      try {
-        stat = await fs.promises.lstat(source.abs);
-      } catch (err) {
-        if (/** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') {
-          throw new PluginError(404, 'ENOENT', `plugin "${id}" is not installed`);
-        }
-        throw err;
-      }
-      if (!stat.isDirectory() && !stat.isSymbolicLink()) {
-        throw new PluginError(409, 'ENOTDIR', `plugin "${id}" is not a directory`);
-      }
-
-      const trashDir = await resolveVaultPath(vault, '.trash/plugins');
-      await fs.promises.mkdir(trashDir.real, { recursive: true });
-      if (!isInside(vault.root, trashDir.real)) {
-        throw new PluginError(403, 'EPERM', 'trash directory escapes the vault');
-      }
-
-      let destination = null;
-      let trashedTo = null;
-      for (let attempt = 0; attempt < 1000; attempt += 1) {
-        const name = attempt === 0 ? id : `${id}-${attempt}`;
-        const candidate = path.join(trashDir.real, name);
+      return await withPluginMutation(id, async () => {
+        const source = await resolveVaultPath(vault, `.obsidian/plugins/${id}`);
+        let stat;
         try {
-          await fs.promises.lstat(candidate);
-          continue; // never overwrite an earlier trash entry
+          stat = await fs.promises.lstat(source.abs);
         } catch (err) {
-          if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') throw err;
+          if (/** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') {
+            throw new PluginError(404, 'ENOENT', `plugin "${id}" is not installed`);
+          }
+          throw err;
         }
-        destination = candidate;
-        trashedTo = `.trash/plugins/${name}`;
-        break;
-      }
-      if (destination === null) {
-        throw new PluginError(409, 'EEXIST', `too many trash copies of "${id}"`);
-      }
+        if (!stat.isDirectory() && !stat.isSymbolicLink()) {
+          throw new PluginError(409, 'ENOTDIR', `plugin "${id}" is not a directory`);
+        }
 
-      // Rename the directory entry itself, not the symlink target: dev setups
-      // often symlink a plugin directory into the vault.
-      await fs.promises.rename(source.abs, destination);
-      return reply.send({ ok: true, id, trashedTo });
+        const trashDir = await resolveVaultPath(vault, '.trash/plugins');
+        await fs.promises.mkdir(trashDir.real, { recursive: true });
+        if (!isInside(vault.root, trashDir.real)) {
+          throw new PluginError(403, 'EPERM', 'trash directory escapes the vault');
+        }
+
+        let destination = null;
+        let trashedTo = null;
+        for (let attempt = 0; attempt < 1000; attempt += 1) {
+          const name = attempt === 0 ? id : `${id}-${attempt}`;
+          const candidate = path.join(trashDir.real, name);
+          try {
+            await fs.promises.lstat(candidate);
+            continue; // never overwrite an earlier trash entry
+          } catch (err) {
+            if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') throw err;
+          }
+          destination = candidate;
+          trashedTo = `.trash/plugins/${name}`;
+          break;
+        }
+        if (destination === null) {
+          throw new PluginError(409, 'EEXIST', `too many trash copies of "${id}"`);
+        }
+
+        // Rename the directory entry itself, not the symlink target: dev setups
+        // often symlink a plugin directory into the vault.
+        await fs.promises.rename(source.abs, destination);
+        return reply.send({ ok: true, id, trashedTo });
+      });
     } catch (err) {
       return sendPluginError(reply, pluginFsError(err));
     }
